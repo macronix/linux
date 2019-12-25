@@ -6,8 +6,8 @@ import socket
 import struct
 import sys
 import unittest
-from fcntl import ioctl
-
+import fcntl
+import select
 
 TPM2_ST_NO_SESSIONS = 0x8001
 TPM2_ST_SESSIONS = 0x8002
@@ -22,6 +22,7 @@ TPM2_CC_UNSEAL = 0x015E
 TPM2_CC_FLUSH_CONTEXT = 0x0165
 TPM2_CC_START_AUTH_SESSION = 0x0176
 TPM2_CC_GET_CAPABILITY	= 0x017A
+TPM2_CC_GET_RANDOM = 0x017B
 TPM2_CC_PCR_READ = 0x017E
 TPM2_CC_POLICY_PCR = 0x017F
 TPM2_CC_PCR_EXTEND = 0x0182
@@ -351,22 +352,37 @@ def hex_dump(d):
 class Client:
     FLAG_DEBUG = 0x01
     FLAG_SPACE = 0x02
+    FLAG_NONBLOCK = 0x04
     TPM_IOC_NEW_SPACE = 0xa200
 
     def __init__(self, flags = 0):
         self.flags = flags
 
         if (self.flags & Client.FLAG_SPACE) == 0:
-            self.tpm = open('/dev/tpm0', 'r+b')
+            self.tpm = open('/dev/tpm0', 'r+b', buffering=0)
         else:
-            self.tpm = open('/dev/tpmrm0', 'r+b')
+            self.tpm = open('/dev/tpmrm0', 'r+b', buffering=0)
+
+        if (self.flags & Client.FLAG_NONBLOCK):
+            flags = fcntl.fcntl(self.tpm, fcntl.F_GETFL)
+            flags |= os.O_NONBLOCK
+            fcntl.fcntl(self.tpm, fcntl.F_SETFL, flags)
+            self.tpm_poll = select.poll()
 
     def close(self):
         self.tpm.close()
 
     def send_cmd(self, cmd):
         self.tpm.write(cmd)
+
+        if (self.flags & Client.FLAG_NONBLOCK):
+            self.tpm_poll.register(self.tpm, select.POLLIN)
+            self.tpm_poll.poll(10000)
+
         rsp = self.tpm.read()
+
+        if (self.flags & Client.FLAG_NONBLOCK):
+            self.tpm_poll.unregister(self.tpm)
 
         if (self.flags & Client.FLAG_DEBUG) != 0:
             sys.stderr.write('cmd' + os.linesep)

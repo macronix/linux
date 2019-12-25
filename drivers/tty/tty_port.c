@@ -89,7 +89,8 @@ void tty_port_link_device(struct tty_port *port,
 {
 	if (WARN_ON(index >= driver->num))
 		return;
-	driver->ports[index] = port;
+	if (!driver->ports[index])
+		driver->ports[index] = port;
 }
 EXPORT_SYMBOL_GPL(tty_port_link_device);
 
@@ -325,7 +326,7 @@ static void tty_port_shutdown(struct tty_port *port, struct tty_struct *tty)
 		if (tty && C_HUPCL(tty))
 			tty_port_lower_dtr_rts(port);
 
-		if (port->ops && port->ops->shutdown)
+		if (port->ops->shutdown)
 			port->ops->shutdown(port);
 	}
 out:
@@ -398,7 +399,7 @@ EXPORT_SYMBOL_GPL(tty_port_tty_wakeup);
  */
 int tty_port_carrier_raised(struct tty_port *port)
 {
-	if (!port->ops || !port->ops->carrier_raised)
+	if (port->ops->carrier_raised == NULL)
 		return 1;
 	return port->ops->carrier_raised(port);
 }
@@ -414,7 +415,7 @@ EXPORT_SYMBOL(tty_port_carrier_raised);
  */
 void tty_port_raise_dtr_rts(struct tty_port *port)
 {
-	if (port->ops && port->ops->dtr_rts)
+	if (port->ops->dtr_rts)
 		port->ops->dtr_rts(port, 1);
 }
 EXPORT_SYMBOL(tty_port_raise_dtr_rts);
@@ -429,7 +430,7 @@ EXPORT_SYMBOL(tty_port_raise_dtr_rts);
  */
 void tty_port_lower_dtr_rts(struct tty_port *port)
 {
-	if (port->ops && port->ops->dtr_rts)
+	if (port->ops->dtr_rts)
 		port->ops->dtr_rts(port, 0);
 }
 EXPORT_SYMBOL(tty_port_lower_dtr_rts);
@@ -684,7 +685,7 @@ int tty_port_open(struct tty_port *port, struct tty_struct *tty,
 
 	if (!tty_port_initialized(port)) {
 		clear_bit(TTY_IO_ERROR, &tty->flags);
-		if (port->ops && port->ops->activate) {
+		if (port->ops->activate) {
 			int retval = port->ops->activate(port, tty);
 			if (retval) {
 				mutex_unlock(&port->mutex);

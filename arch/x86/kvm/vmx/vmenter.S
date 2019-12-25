@@ -3,6 +3,7 @@
 #include <asm/asm.h>
 #include <asm/bitsperlong.h>
 #include <asm/kvm_vcpu_regs.h>
+#include <asm/nospec-branch.h>
 
 #define WORD_SIZE (BITS_PER_LONG / 8)
 
@@ -42,7 +43,7 @@
  * they VM-Fail, whereas a successful VM-Enter + VM-Exit will jump
  * to vmx_vmexit.
  */
-ENTRY(vmx_vmenter)
+SYM_FUNC_START(vmx_vmenter)
 	/* EFLAGS.ZF is set if VMCS.LAUNCHED == 0 */
 	je 2f
 
@@ -53,9 +54,9 @@ ENTRY(vmx_vmenter)
 	ret
 
 3:	cmpb $0, kvm_rebooting
-	jne 4f
-	call kvm_spurious_fault
-4:	ret
+	je 4f
+	ret
+4:	ud2
 
 	.pushsection .fixup, "ax"
 5:	jmp 3b
@@ -64,7 +65,7 @@ ENTRY(vmx_vmenter)
 	_ASM_EXTABLE(1b, 5b)
 	_ASM_EXTABLE(2b, 5b)
 
-ENDPROC(vmx_vmenter)
+SYM_FUNC_END(vmx_vmenter)
 
 /**
  * vmx_vmexit - Handle a VMX VM-Exit
@@ -76,20 +77,31 @@ ENDPROC(vmx_vmenter)
  * here after hardware loads the host's state, i.e. this is the destination
  * referred to by VMCS.HOST_RIP.
  */
-ENTRY(vmx_vmexit)
+SYM_FUNC_START(vmx_vmexit)
+#ifdef CONFIG_RETPOLINE
+	ALTERNATIVE "jmp .Lvmexit_skip_rsb", "", X86_FEATURE_RETPOLINE
+	/* Preserve guest's RAX, it's used to stuff the RSB. */
+	push %_ASM_AX
+
+	/* IMPORTANT: Stuff the RSB immediately after VM-Exit, before RET! */
+	FILL_RETURN_BUFFER %_ASM_AX, RSB_CLEAR_LOOPS, X86_FEATURE_RETPOLINE
+
+	pop %_ASM_AX
+.Lvmexit_skip_rsb:
+#endif
 	ret
-ENDPROC(vmx_vmexit)
+SYM_FUNC_END(vmx_vmexit)
 
 /**
  * __vmx_vcpu_run - Run a vCPU via a transition to VMX guest mode
- * @vmx:	struct vcpu_vmx *
+ * @vmx:	struct vcpu_vmx * (forwarded to vmx_update_host_rsp)
  * @regs:	unsigned long * (to guest registers)
  * @launched:	%true if the VMCS has been launched
  *
  * Returns:
  *	0 on VM-Exit, 1 on VM-Fail
  */
-ENTRY(__vmx_vcpu_run)
+SYM_FUNC_START(__vmx_vcpu_run)
 	push %_ASM_BP
 	mov  %_ASM_SP, %_ASM_BP
 #ifdef CONFIG_X86_64
@@ -139,7 +151,7 @@ ENTRY(__vmx_vcpu_run)
 	mov VCPU_R14(%_ASM_AX), %r14
 	mov VCPU_R15(%_ASM_AX), %r15
 #endif
-	/* Load guest RAX.  This kills the vmx_vcpu pointer! */
+	/* Load guest RAX.  This kills the @regs pointer! */
 	mov VCPU_RAX(%_ASM_AX), %_ASM_AX
 
 	/* Enter guest mode */
@@ -221,4 +233,4 @@ ENTRY(__vmx_vcpu_run)
 	/* VM-Fail.  Out-of-line to avoid a taken Jcc after VM-Exit. */
 2:	mov $1, %eax
 	jmp 1b
-ENDPROC(__vmx_vcpu_run)
+SYM_FUNC_END(__vmx_vcpu_run)
