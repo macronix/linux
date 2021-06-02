@@ -35,7 +35,7 @@ static const struct rhashtable_params br_vlan_tunnel_rht_params = {
 };
 
 static struct net_bridge_vlan *br_vlan_tunnel_lookup(struct rhashtable *tbl,
-						     u64 tunnel_id)
+						     __be64 tunnel_id)
 {
 	return rhashtable_lookup_fast(tbl, &tunnel_id,
 				      br_vlan_tunnel_rht_params);
@@ -89,7 +89,8 @@ out:
 /* Must be protected by RTNL.
  * Must be called with vid in range from 1 to 4094 inclusive.
  */
-int nbp_vlan_tunnel_info_add(struct net_bridge_port *port, u16 vid, u32 tun_id)
+int nbp_vlan_tunnel_info_add(const struct net_bridge_port *port, u16 vid,
+			     u32 tun_id)
 {
 	struct net_bridge_vlan_group *vg;
 	struct net_bridge_vlan *vlan;
@@ -107,7 +108,7 @@ int nbp_vlan_tunnel_info_add(struct net_bridge_port *port, u16 vid, u32 tun_id)
 /* Must be protected by RTNL.
  * Must be called with vid in range from 1 to 4094 inclusive.
  */
-int nbp_vlan_tunnel_info_delete(struct net_bridge_port *port, u16 vid)
+int nbp_vlan_tunnel_info_delete(const struct net_bridge_port *port, u16 vid)
 {
 	struct net_bridge_vlan_group *vg;
 	struct net_bridge_vlan *v;

@@ -14,6 +14,18 @@ enum sec_calg {
 	SEC_CALG_SM4  = 0x3,
 };
 
+enum sec_hash_alg {
+	SEC_A_HMAC_SHA1   = 0x10,
+	SEC_A_HMAC_SHA256 = 0x11,
+	SEC_A_HMAC_SHA512 = 0x15,
+};
+
+enum sec_mac_len {
+	SEC_HMAC_SHA1_MAC   = 20,
+	SEC_HMAC_SHA256_MAC = 32,
+	SEC_HMAC_SHA512_MAC = 64,
+};
+
 enum sec_cmode {
 	SEC_CMODE_ECB    = 0x0,
 	SEC_CMODE_CBC    = 0x1,
@@ -34,6 +46,12 @@ enum sec_bd_type {
 	SEC_BD_TYPE2 = 0x2,
 };
 
+enum sec_auth {
+	SEC_NO_AUTH = 0x0,
+	SEC_AUTH_TYPE1 = 0x1,
+	SEC_AUTH_TYPE2 = 0x2,
+};
+
 enum sec_cipher_dir {
 	SEC_CIPHER_ENC = 0x1,
 	SEC_CIPHER_DEC = 0x2,
@@ -46,10 +64,9 @@ enum sec_addr_type {
 };
 
 struct sec_sqe_type2 {
-
 	/*
-	 * mac_len: 0~5 bits
-	 * a_key_len: 6~10 bits
+	 * mac_len: 0~4 bits
+	 * a_key_len: 5~10 bits
 	 * a_alg: 11~16 bits
 	 */
 	__le32 mac_key_alg;
@@ -101,7 +118,6 @@ struct sec_sqe_type2 {
 
 	/* c_pad_len_field: 0~1 bits */
 	__le16 c_pad_len_field;
-
 
 	__le64 long_a_data_len;
 	__le64 a_ivin_addr;
@@ -193,6 +209,6 @@ struct sec_sqe {
 	struct sec_sqe_type2 type2;
 };
 
-int sec_register_to_crypto(void);
-void sec_unregister_from_crypto(void);
+int sec_register_to_crypto(struct hisi_qm *qm);
+void sec_unregister_from_crypto(struct hisi_qm *qm);
 #endif

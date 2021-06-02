@@ -2,7 +2,7 @@
 /*
  * Turris Mox module configuration bus driver
  *
- * Copyright (C) 2019 Marek Behun <marek.behun@nic.cz>
+ * Copyright (C) 2019 Marek Behún <kabel@kernel.org>
  */
 
 #include <dt-bindings/bus/moxtet.h>
@@ -102,12 +102,11 @@ static int moxtet_match(struct device *dev, struct device_driver *drv)
 	return 0;
 }
 
-struct bus_type moxtet_bus_type = {
+static struct bus_type moxtet_bus_type = {
 	.name		= "moxtet",
 	.dev_groups	= moxtet_dev_groups,
 	.match		= moxtet_match,
 };
-EXPORT_SYMBOL_GPL(moxtet_bus_type);
 
 int __moxtet_register_driver(struct module *owner,
 			     struct moxtet_driver *mdrv)
@@ -466,7 +465,7 @@ static ssize_t input_read(struct file *file, char __user *buf, size_t len,
 {
 	struct moxtet *moxtet = file->private_data;
 	u8 bin[TURRIS_MOX_MAX_MODULES];
-	u8 hex[sizeof(buf) * 2 + 1];
+	u8 hex[sizeof(bin) * 2 + 1];
 	int ret, n;
 
 	ret = moxtet_spi_read(moxtet, bin);
@@ -880,6 +879,6 @@ static void __exit moxtet_exit(void)
 }
 module_exit(moxtet_exit);
 
-MODULE_AUTHOR("Marek Behun <marek.behun@nic.cz>");
+MODULE_AUTHOR("Marek Behun <kabel@kernel.org>");
 MODULE_DESCRIPTION("CZ.NIC's Turris Mox module configuration bus");
 MODULE_LICENSE("GPL v2");

@@ -224,16 +224,22 @@ static void frontbuffer_release(struct kref *ref)
 	struct drm_i915_gem_object *obj = front->obj;
 	struct i915_vma *vma;
 
+	drm_WARN_ON(obj->base.dev, atomic_read(&front->bits));
+
 	spin_lock(&obj->vma.lock);
-	for_each_ggtt_vma(vma, obj)
+	for_each_ggtt_vma(vma, obj) {
+		i915_vma_clear_scanout(vma);
 		vma->display_alignment = I915_GTT_MIN_ALIGNMENT;
+	}
 	spin_unlock(&obj->vma.lock);
 
-	obj->frontbuffer = NULL;
+	RCU_INIT_POINTER(obj->frontbuffer, NULL);
 	spin_unlock(&to_i915(obj->base.dev)->fb_tracking.lock);
 
+	i915_active_fini(&front->write);
+
 	i915_gem_object_put(obj);
-	kfree(front);
+	kfree_rcu(front, rcu);
 }
 
 struct intel_frontbuffer *
@@ -242,11 +248,7 @@ intel_frontbuffer_get(struct drm_i915_gem_object *obj)
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
 	struct intel_frontbuffer *front;
 
-	spin_lock(&i915->fb_tracking.lock);
-	front = obj->frontbuffer;
-	if (front)
-		kref_get(&front->ref);
-	spin_unlock(&i915->fb_tracking.lock);
+	front = __intel_frontbuffer_get(obj);
 	if (front)
 		return front;
 
@@ -262,13 +264,13 @@ intel_frontbuffer_get(struct drm_i915_gem_object *obj)
 			 i915_active_may_sleep(frontbuffer_retire));
 
 	spin_lock(&i915->fb_tracking.lock);
-	if (obj->frontbuffer) {
+	if (rcu_access_pointer(obj->frontbuffer)) {
 		kfree(front);
-		front = obj->frontbuffer;
+		front = rcu_dereference_protected(obj->frontbuffer, true);
 		kref_get(&front->ref);
 	} else {
 		i915_gem_object_get(obj);
-		obj->frontbuffer = front;
+		rcu_assign_pointer(obj->frontbuffer, front);
 	}
 	spin_unlock(&i915->fb_tracking.lock);
 
@@ -306,12 +308,14 @@ void intel_frontbuffer_track(struct intel_frontbuffer *old,
 		     BITS_PER_TYPE(atomic_t));
 
 	if (old) {
-		WARN_ON(!(atomic_read(&old->bits) & frontbuffer_bits));
+		drm_WARN_ON(old->obj->base.dev,
+			    !(atomic_read(&old->bits) & frontbuffer_bits));
 		atomic_andnot(frontbuffer_bits, &old->bits);
 	}
 
 	if (new) {
-		WARN_ON(atomic_read(&new->bits) & frontbuffer_bits);
+		drm_WARN_ON(new->obj->base.dev,
+			    atomic_read(&new->bits) & frontbuffer_bits);
 		atomic_or(frontbuffer_bits, &new->bits);
 	}
 }

@@ -42,7 +42,7 @@ void pci_set_bus_of_node(struct pci_bus *bus)
 	} else {
 		node = of_node_get(bus->self->dev.of_node);
 		if (node && of_property_read_bool(node, "external-facing"))
-			bus->self->untrusted = true;
+			bus->self->external_facing = true;
 	}
 
 	bus->dev.of_node = node;
@@ -190,10 +190,18 @@ int of_pci_parse_bus_range(struct device_node *node, struct resource *res)
 EXPORT_SYMBOL_GPL(of_pci_parse_bus_range);
 
 /**
- * This function will try to obtain the host bridge domain number by
- * finding a property called "linux,pci-domain" of the given device node.
+ * of_get_pci_domain_nr - Find the host bridge domain number
+ *			  of the given device node.
+ * @node: Device tree node with the domain information.
  *
- * @node: device tree node with the domain information
+ * This function will try to obtain the host bridge domain number by finding
+ * a property called "linux,pci-domain" of the given device node.
+ *
+ * Return:
+ * * > 0	- On success, an associated domain number.
+ * * -EINVAL	- The property "linux,pci-domain" does not exist.
+ * * -ENODATA	- The linux,pci-domain" property does not have value.
+ * * -EOVERFLOW	- Invalid "linux,pci-domain" property value.
  *
  * Returns the associated domain number from DT in the range [0-0xffff], or
  * a negative value if the required property is not found.
@@ -243,6 +251,8 @@ EXPORT_SYMBOL_GPL(of_pci_check_probe_only);
  * @busno: bus number associated with the bridge root bus
  * @bus_max: maximum number of buses for this bridge
  * @resources: list where the range of resources will be added after DT parsing
+ * @ib_resources: list where the range of inbound resources (with addresses
+ *                from 'dma-ranges') will be added after DT parsing
  * @io_base: pointer to a variable that will contain on return the physical
  * address for the start of the I/O range. Can be NULL if the caller doesn't
  * expect I/O ranges to be present in the device tree.
@@ -521,28 +531,26 @@ int of_irq_parse_and_map_pci(const struct pci_dev *dev, u8 slot, u8 pin)
 EXPORT_SYMBOL_GPL(of_irq_parse_and_map_pci);
 #endif	/* CONFIG_OF_IRQ */
 
-int pci_parse_request_of_pci_ranges(struct device *dev,
-				    struct list_head *resources,
-				    struct list_head *ib_resources,
-				    struct resource **bus_range)
+static int pci_parse_request_of_pci_ranges(struct device *dev,
+					   struct pci_host_bridge *bridge)
 {
 	int err, res_valid = 0;
 	resource_size_t iobase;
 	struct resource_entry *win, *tmp;
 
-	INIT_LIST_HEAD(resources);
-	if (ib_resources)
-		INIT_LIST_HEAD(ib_resources);
-	err = devm_of_pci_get_host_bridge_resources(dev, 0, 0xff, resources,
-						    ib_resources, &iobase);
+	INIT_LIST_HEAD(&bridge->windows);
+	INIT_LIST_HEAD(&bridge->dma_ranges);
+
+	err = devm_of_pci_get_host_bridge_resources(dev, 0, 0xff, &bridge->windows,
+						    &bridge->dma_ranges, &iobase);
 	if (err)
 		return err;
 
-	err = devm_request_pci_bus_resources(dev, resources);
+	err = devm_request_pci_bus_resources(dev, &bridge->windows);
 	if (err)
-		goto out_release_res;
+		return err;
 
-	resource_list_for_each_entry_safe(win, tmp, resources) {
+	resource_list_for_each_entry_safe(win, tmp, &bridge->windows) {
 		struct resource *res = win->res;
 
 		switch (resource_type(res)) {
@@ -556,33 +564,45 @@ int pci_parse_request_of_pci_ranges(struct device *dev,
 			break;
 		case IORESOURCE_MEM:
 			res_valid |= !(res->flags & IORESOURCE_PREFETCH);
-			break;
-		case IORESOURCE_BUS:
-			if (bus_range)
-				*bus_range = res;
+
+			if (!(res->flags & IORESOURCE_PREFETCH))
+				if (upper_32_bits(resource_size(res)))
+					dev_warn(dev, "Memory resource size exceeds max for 32 bits\n");
+
 			break;
 		}
 	}
 
-	if (res_valid)
+	if (!res_valid)
+		dev_warn(dev, "non-prefetchable memory resource required\n");
+
+	return 0;
+}
+
+int devm_of_pci_bridge_init(struct device *dev, struct pci_host_bridge *bridge)
+{
+	if (!dev->of_node)
 		return 0;
 
-	dev_err(dev, "non-prefetchable memory resource required\n");
-	err = -EINVAL;
+	bridge->swizzle_irq = pci_common_swizzle;
+	bridge->map_irq = of_irq_parse_and_map_pci;
 
- out_release_res:
-	pci_free_resource_list(resources);
-	return err;
+	return pci_parse_request_of_pci_ranges(dev, bridge);
 }
-EXPORT_SYMBOL_GPL(pci_parse_request_of_pci_ranges);
 
 #endif /* CONFIG_PCI */
 
 /**
+ * of_pci_get_max_link_speed - Find the maximum link speed of the given device node.
+ * @node: Device tree node with the maximum link speed information.
+ *
  * This function will try to find the limitation of link speed by finding
  * a property called "max-link-speed" of the given device node.
  *
- * @node: device tree node with the max link speed information
+ * Return:
+ * * > 0	- On success, a maximum link speed.
+ * * -EINVAL	- Invalid "max-link-speed" property value, or failure to access
+ *		  the property of the device tree node.
  *
  * Returns the associated max link speed from DT, or a negative value if the
  * required property is not found or is invalid.
@@ -592,7 +612,7 @@ int of_pci_get_max_link_speed(struct device_node *node)
 	u32 max_link_speed;
 
 	if (of_property_read_u32(node, "max-link-speed", &max_link_speed) ||
-	    max_link_speed > 4)
+	    max_link_speed == 0 || max_link_speed > 4)
 		return -EINVAL;
 
 	return max_link_speed;

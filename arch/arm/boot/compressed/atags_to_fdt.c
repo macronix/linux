@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/libfdt_env.h>
 #include <asm/setup.h>
 #include <libfdt.h>
 
@@ -14,7 +15,8 @@ static int node_offset(void *fdt, const char *node_path)
 {
 	int offset = fdt_path_offset(fdt, node_path);
 	if (offset == -FDT_ERR_NOTFOUND)
-		offset = fdt_add_subnode(fdt, 0, node_path);
+		/* Add the node to root if not found, dropping the leading '/' */
+		offset = fdt_add_subnode(fdt, 0, node_path + 1);
 	return offset;
 }
 

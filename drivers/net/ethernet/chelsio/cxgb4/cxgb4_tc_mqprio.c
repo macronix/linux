@@ -12,8 +12,9 @@ static int cxgb4_mqprio_validate(struct net_device *dev,
 	struct port_info *pi = netdev2pinfo(dev);
 	struct adapter *adap = netdev2adap(dev);
 	u32 speed, qcount = 0, qoffset = 0;
+	u32 start_a, start_b, end_a, end_b;
 	int ret;
-	u8 i;
+	u8 i, j;
 
 	if (!mqprio->qopt.num_tc)
 		return 0;
@@ -46,6 +47,31 @@ static int cxgb4_mqprio_validate(struct net_device *dev,
 	for (i = 0; i < mqprio->qopt.num_tc; i++) {
 		qoffset = max_t(u16, mqprio->qopt.offset[i], qoffset);
 		qcount += mqprio->qopt.count[i];
+
+		start_a = mqprio->qopt.offset[i];
+		end_a = start_a + mqprio->qopt.count[i] - 1;
+		for (j = i + 1; j < mqprio->qopt.num_tc; j++) {
+			start_b = mqprio->qopt.offset[j];
+			end_b = start_b + mqprio->qopt.count[j] - 1;
+
+			/* If queue count is 0, then the traffic
+			 * belonging to this class will not use
+			 * ETHOFLD queues. So, no need to validate
+			 * further.
+			 */
+			if (!mqprio->qopt.count[i])
+				break;
+
+			if (!mqprio->qopt.count[j])
+				continue;
+
+			if (max_t(u32, start_a, start_b) <=
+			    min_t(u32, end_a, end_b)) {
+				netdev_err(dev,
+					   "Queues can't overlap across tc\n");
+				return -EINVAL;
+			}
+		}
 
 		/* Convert byte per second to bits per second */
 		min_rate += (mqprio->min_rate[i] * 8);
@@ -88,8 +114,7 @@ static int cxgb4_init_eosw_txq(struct net_device *dev,
 	eosw_txq->cred = adap->params.ofldq_wr_cred;
 	eosw_txq->hwqid = hwqid;
 	eosw_txq->netdev = dev;
-	tasklet_init(&eosw_txq->qresume_tsk, cxgb4_ethofld_restart,
-		     (unsigned long)eosw_txq);
+	tasklet_setup(&eosw_txq->qresume_tsk, cxgb4_ethofld_restart);
 	return 0;
 }
 
@@ -275,6 +300,7 @@ static void cxgb4_mqprio_free_hw_resources(struct net_device *dev)
 			cxgb4_clear_msix_aff(eorxq->msix->vec,
 					     eorxq->msix->aff_mask);
 			free_irq(eorxq->msix->vec, &eorxq->rspq);
+			cxgb4_free_msix_idx_in_bmap(adap, eorxq->msix->idx);
 		}
 
 		free_rspq_fl(adap, &eorxq->rspq, &eorxq->fl);
@@ -314,6 +340,13 @@ static int cxgb4_mqprio_alloc_tc(struct net_device *dev,
 		/* Convert from bytes per second to Kbps */
 		p.u.params.minrate = div_u64(mqprio->min_rate[i] * 8, 1000);
 		p.u.params.maxrate = div_u64(mqprio->max_rate[i] * 8, 1000);
+
+		/* Request larger burst buffer for smaller MTU, so
+		 * that hardware can work on more data per burst
+		 * cycle.
+		 */
+		if (dev->mtu <= ETH_DATA_LEN)
+			p.u.params.burstsize = 8 * dev->mtu;
 
 		e = cxgb4_sched_class_alloc(dev, &p);
 		if (!e) {
@@ -540,12 +573,15 @@ static void cxgb4_mqprio_disable_offload(struct net_device *dev)
 int cxgb4_setup_tc_mqprio(struct net_device *dev,
 			  struct tc_mqprio_qopt_offload *mqprio)
 {
+	struct adapter *adap = netdev2adap(dev);
 	bool needs_bring_up = false;
 	int ret;
 
 	ret = cxgb4_mqprio_validate(dev, mqprio);
 	if (ret)
 		return ret;
+
+	mutex_lock(&adap->tc_mqprio->mqprio_mutex);
 
 	/* To configure tc params, the current allocated EOTIDs must
 	 * be freed up. However, they can't be freed up if there's
@@ -582,7 +618,32 @@ out:
 	if (needs_bring_up)
 		cxgb_open(dev);
 
+	mutex_unlock(&adap->tc_mqprio->mqprio_mutex);
 	return ret;
+}
+
+void cxgb4_mqprio_stop_offload(struct adapter *adap)
+{
+	struct cxgb4_tc_port_mqprio *tc_port_mqprio;
+	struct net_device *dev;
+	u8 i;
+
+	if (!adap->tc_mqprio || !adap->tc_mqprio->port_mqprio)
+		return;
+
+	mutex_lock(&adap->tc_mqprio->mqprio_mutex);
+	for_each_port(adap, i) {
+		dev = adap->port[i];
+		if (!dev)
+			continue;
+
+		tc_port_mqprio = &adap->tc_mqprio->port_mqprio[i];
+		if (!tc_port_mqprio->mqprio.qopt.num_tc)
+			continue;
+
+		cxgb4_mqprio_disable_offload(dev);
+	}
+	mutex_unlock(&adap->tc_mqprio->mqprio_mutex);
 }
 
 int cxgb4_init_tc_mqprio(struct adapter *adap)
@@ -603,6 +664,8 @@ int cxgb4_init_tc_mqprio(struct adapter *adap)
 		ret = -ENOMEM;
 		goto out_free_mqprio;
 	}
+
+	mutex_init(&tc_mqprio->mqprio_mutex);
 
 	tc_mqprio->port_mqprio = tc_port_mqprio;
 	for (i = 0; i < adap->params.nports; i++) {
@@ -638,6 +701,7 @@ void cxgb4_cleanup_tc_mqprio(struct adapter *adap)
 	u8 i;
 
 	if (adap->tc_mqprio) {
+		mutex_lock(&adap->tc_mqprio->mqprio_mutex);
 		if (adap->tc_mqprio->port_mqprio) {
 			for (i = 0; i < adap->params.nports; i++) {
 				struct net_device *dev = adap->port[i];
@@ -649,6 +713,7 @@ void cxgb4_cleanup_tc_mqprio(struct adapter *adap)
 			}
 			kfree(adap->tc_mqprio->port_mqprio);
 		}
+		mutex_unlock(&adap->tc_mqprio->mqprio_mutex);
 		kfree(adap->tc_mqprio);
 	}
 }

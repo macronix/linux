@@ -81,8 +81,8 @@ struct lowcore {
 	psw_t	return_mcck_psw;		/* 0x02a0 */
 
 	/* CPU accounting and timing values. */
-	__u64	sync_enter_timer;		/* 0x02b0 */
-	__u64	async_enter_timer;		/* 0x02b8 */
+	__u64	sys_enter_timer;		/* 0x02b0 */
+	__u8	pad_0x02b8[0x02c0-0x02b8];	/* 0x02b8 */
 	__u64	mcck_enter_timer;		/* 0x02c0 */
 	__u64	exit_timer;			/* 0x02c8 */
 	__u64	user_timer;			/* 0x02d0 */
@@ -107,16 +107,15 @@ struct lowcore {
 	__u64	async_stack;			/* 0x0350 */
 	__u64	nodat_stack;			/* 0x0358 */
 	__u64	restart_stack;			/* 0x0360 */
-
+	__u64	mcck_stack;			/* 0x0368 */
 	/* Restart function and parameter. */
-	__u64	restart_fn;			/* 0x0368 */
-	__u64	restart_data;			/* 0x0370 */
-	__u64	restart_source;			/* 0x0378 */
+	__u64	restart_fn;			/* 0x0370 */
+	__u64	restart_data;			/* 0x0378 */
+	__u64	restart_source;			/* 0x0380 */
 
 	/* Address space pointer. */
-	__u64	kernel_asce;			/* 0x0380 */
-	__u64	user_asce;			/* 0x0388 */
-	__u64	vdso_asce;			/* 0x0390 */
+	__u64	kernel_asce;			/* 0x0388 */
+	__u64	user_asce;			/* 0x0390 */
 
 	/*
 	 * The lpp and current_pid fields form a
@@ -134,14 +133,16 @@ struct lowcore {
 	__u32	spinlock_index;			/* 0x03b0 */
 	__u32	fpu_flags;			/* 0x03b4 */
 	__u64	percpu_offset;			/* 0x03b8 */
-	__u64	vdso_per_cpu_data;		/* 0x03c0 */
+	__u8	pad_0x03c0[0x03c8-0x03c0];	/* 0x03c0 */
 	__u64	machine_flags;			/* 0x03c8 */
 	__u64	gmap;				/* 0x03d0 */
 	__u8	pad_0x03d8[0x0400-0x03d8];	/* 0x03d8 */
 
 	/* br %r1 trampoline */
 	__u16	br_r1_trampoline;		/* 0x0400 */
-	__u8	pad_0x0402[0x0e00-0x0402];	/* 0x0402 */
+	__u32	return_lpswe;			/* 0x0402 */
+	__u32	return_mcck_lpswe;		/* 0x0406 */
+	__u8	pad_0x040a[0x0e00-0x040a];	/* 0x040a */
 
 	/*
 	 * 0xe00 contains the address of the IPL Parameter Information

@@ -13,12 +13,15 @@
  * THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
  */
 
+#include <linux/debugfs.h>
 #include <linux/device.h>
+#include <linux/ethtool.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/u64_stats_sync.h>
 #include <net/devlink.h>
+#include <net/udp_tunnel.h>
 #include <net/xdp.h>
 
 #define DRV_NAME	"netdevsim"
@@ -29,6 +32,7 @@
 
 #define NSIM_IPSEC_MAX_SA_COUNT		33
 #define NSIM_IPSEC_VALID		BIT(31)
+#define NSIM_UDP_TUNNEL_N_PORTS		4
 
 struct nsim_sa {
 	struct xfrm_state *xs;
@@ -46,6 +50,22 @@ struct nsim_ipsec {
 	u32 count;
 	u32 tx;
 	u32 ok;
+};
+
+struct nsim_ethtool_pauseparam {
+	bool rx;
+	bool tx;
+	bool report_stats_rx;
+	bool report_stats_tx;
+};
+
+struct nsim_ethtool {
+	u32 get_err;
+	u32 set_err;
+	struct nsim_ethtool_pauseparam pauseparam;
+	struct ethtool_coalesce coalesce;
+	struct ethtool_ringparam ring;
+	struct ethtool_fecparam fec;
 };
 
 struct netdevsim {
@@ -72,11 +92,27 @@ struct netdevsim {
 
 	bool bpf_map_accept;
 	struct nsim_ipsec ipsec;
+	struct {
+		u32 inject_error;
+		u32 sleep;
+		u32 __ports[2][NSIM_UDP_TUNNEL_N_PORTS];
+		u32 (*ports)[NSIM_UDP_TUNNEL_N_PORTS];
+		struct debugfs_u32_array dfs_ports[2];
+	} udp_ports;
+
+	struct nsim_ethtool ethtool;
 };
 
 struct netdevsim *
 nsim_create(struct nsim_dev *nsim_dev, struct nsim_dev_port *nsim_dev_port);
 void nsim_destroy(struct netdevsim *ns);
+
+void nsim_ethtool_init(struct netdevsim *ns);
+
+void nsim_udp_tunnels_debugfs_create(struct nsim_dev *nsim_dev);
+int nsim_udp_tunnels_info_create(struct nsim_dev *nsim_dev,
+				 struct net_device *dev);
+void nsim_udp_tunnels_info_destroy(struct net_device *dev);
 
 #ifdef CONFIG_BPF_SYSCALL
 int nsim_bpf_dev_init(struct nsim_dev *nsim_dev);
@@ -108,7 +144,7 @@ static inline void nsim_bpf_uninit(struct netdevsim *ns)
 
 static inline int nsim_bpf(struct net_device *dev, struct netdev_bpf *bpf)
 {
-	return bpf->command == XDP_QUERY_PROG ? 0 : -EOPNOTSUPP;
+	return -EOPNOTSUPP;
 }
 
 static inline int nsim_bpf_disable_tc(struct netdevsim *ns)
@@ -132,6 +168,7 @@ enum nsim_resource_id {
 	NSIM_RESOURCE_IPV6,
 	NSIM_RESOURCE_IPV6_FIB,
 	NSIM_RESOURCE_IPV6_FIB_RULES,
+	NSIM_RESOURCE_NEXTHOPS,
 };
 
 struct nsim_dev_health {
@@ -145,6 +182,20 @@ struct nsim_dev_health {
 
 int nsim_dev_health_init(struct nsim_dev *nsim_dev, struct devlink *devlink);
 void nsim_dev_health_exit(struct nsim_dev *nsim_dev);
+
+#if IS_ENABLED(CONFIG_PSAMPLE)
+int nsim_dev_psample_init(struct nsim_dev *nsim_dev);
+void nsim_dev_psample_exit(struct nsim_dev *nsim_dev);
+#else
+static inline int nsim_dev_psample_init(struct nsim_dev *nsim_dev)
+{
+	return 0;
+}
+
+static inline void nsim_dev_psample_exit(struct nsim_dev *nsim_dev)
+{
+}
+#endif
 
 struct nsim_dev_port {
 	struct list_head list;
@@ -160,8 +211,10 @@ struct nsim_dev {
 	struct nsim_trap_data *trap_data;
 	struct dentry *ddir;
 	struct dentry *ports_ddir;
+	struct dentry *take_snapshot;
 	struct bpf_offload_dev *bpf_dev;
 	bool bpf_bind_accept;
+	bool bpf_bind_verifier_accept;
 	u32 bpf_bind_verifier_delay;
 	struct dentry *ddir_bpf_bound_progs;
 	u32 prog_id_gen;
@@ -171,12 +224,29 @@ struct nsim_dev {
 	struct list_head port_list;
 	struct mutex port_list_lock; /* protects port list */
 	bool fw_update_status;
+	u32 fw_update_overwrite_mask;
 	u32 max_macs;
 	bool test1;
 	bool dont_allow_reload;
 	bool fail_reload;
 	struct devlink_region *dummy_region;
 	struct nsim_dev_health health;
+	struct flow_action_cookie *fa_cookie;
+	spinlock_t fa_cookie_lock; /* protects fa_cookie */
+	bool fail_trap_group_set;
+	bool fail_trap_policer_set;
+	bool fail_trap_policer_counter_get;
+	struct {
+		struct udp_tunnel_nic_shared utn_shared;
+		u32 __ports[2][NSIM_UDP_TUNNEL_N_PORTS];
+		bool sync_all;
+		bool open_only;
+		bool ipv4_only;
+		bool shared;
+		bool static_iana_vxlan;
+		u32 sleep;
+	} udp_ports;
+	struct nsim_dev_psample *psample;
 };
 
 static inline struct net *nsim_dev_net(struct nsim_dev *nsim_dev)
@@ -240,6 +310,9 @@ struct nsim_bus_dev {
 				  */
 	unsigned int num_vfs;
 	struct nsim_vf_config *vfconfigs;
+	/* Lock for devlink->reload_enabled in netdevsim module */
+	struct mutex nsim_bus_reload_lock;
+	bool init;
 };
 
 int nsim_bus_init(void);

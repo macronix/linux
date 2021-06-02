@@ -370,7 +370,7 @@ audit:
  * Returns: 0 on success else error
  */
 static int match_mnt(struct aa_profile *profile, const struct path *path,
-		     char *buffer, struct path *devpath, char *devbuffer,
+		     char *buffer, const struct path *devpath, char *devbuffer,
 		     const char *type, unsigned long flags, void *data,
 		     bool binary)
 {
@@ -442,7 +442,7 @@ int aa_bind_mount(struct aa_label *label, const struct path *path,
 	buffer = aa_get_buffer(false);
 	old_buffer = aa_get_buffer(false);
 	error = -ENOMEM;
-	if (!buffer || old_buffer)
+	if (!buffer || !old_buffer)
 		goto out;
 
 	error = fn_for_each_confined(label, profile,
@@ -579,7 +579,7 @@ out:
 	return error;
 }
 
-static int profile_umount(struct aa_profile *profile, struct path *path,
+static int profile_umount(struct aa_profile *profile, const struct path *path,
 			  char *buffer)
 {
 	struct aa_perms perms = { };

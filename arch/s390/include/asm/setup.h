@@ -8,14 +8,13 @@
 
 #include <linux/bits.h>
 #include <uapi/asm/setup.h>
+#include <linux/build_bug.h>
 
 #define EP_OFFSET		0x10008
 #define EP_STRING		"S390EP"
 #define PARMAREA		0x10400
 #define EARLY_SCCB_OFFSET	0x11000
 #define HEAD_END		0x12000
-
-#define EARLY_SCCB_SIZE		PAGE_SIZE
 
 /*
  * Machine features detected in early.c
@@ -79,12 +78,19 @@ struct parmarea {
 	char command_line[ARCH_COMMAND_LINE_SIZE];	/* 0x10480 */
 };
 
+extern unsigned int zlib_dfltcc_support;
+#define ZLIB_DFLTCC_DISABLED		0
+#define ZLIB_DFLTCC_FULL		1
+#define ZLIB_DFLTCC_DEFLATE_ONLY	2
+#define ZLIB_DFLTCC_INFLATE_ONLY	3
+#define ZLIB_DFLTCC_FULL_DEBUG		4
+
 extern int noexec_disabled;
-extern int memory_end_set;
-extern unsigned long memory_end;
+extern unsigned long ident_map_size;
 extern unsigned long vmalloc_size;
-extern unsigned long max_physmem_end;
-extern unsigned long __swsusp_reset_dma;
+
+/* The Write Back bit position in the physaddr is given by the SLPC PCI */
+extern unsigned long mio_wb_bit_mask;
 
 #define MACHINE_IS_VM		(S390_lowcore.machine_flags & MACHINE_FLAG_VM)
 #define MACHINE_IS_KVM		(S390_lowcore.machine_flags & MACHINE_FLAG_KVM)
@@ -110,9 +116,6 @@ extern unsigned long __swsusp_reset_dma;
 extern unsigned int console_mode;
 extern unsigned int console_devno;
 extern unsigned int console_irq;
-
-extern char vmhalt_cmd[];
-extern char vmpoff_cmd[];
 
 #define CONSOLE_IS_UNDEFINED	(console_mode == 0)
 #define CONSOLE_IS_SCLP		(console_mode == 1)
@@ -153,6 +156,12 @@ extern unsigned long __kaslr_offset;
 static inline unsigned long kaslr_offset(void)
 {
 	return __kaslr_offset;
+}
+
+static inline u32 gen_lpswe(unsigned long addr)
+{
+	BUILD_BUG_ON(addr > 0xfff);
+	return 0xb2b20000 | addr;
 }
 
 #else /* __ASSEMBLY__ */

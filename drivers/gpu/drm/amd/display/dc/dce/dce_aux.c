@@ -31,6 +31,8 @@
 #include "dce_aux.h"
 #include "dce/dce_11_0_sh_mask.h"
 #include "dm_event_log.h"
+#include "dm_helpers.h"
+#include "dmub/inc/dmub_cmd.h"
 
 #define CTX \
 	aux110->base.ctx
@@ -60,12 +62,14 @@ enum {
 	AUX_DEFER_RETRY_COUNTER = 6
 };
 
-#define TIME_OUT_INCREMENT      1016
-#define TIME_OUT_MULTIPLIER_8 	8
-#define TIME_OUT_MULTIPLIER_16  16
-#define TIME_OUT_MULTIPLIER_32  32
-#define TIME_OUT_MULTIPLIER_64  64
-#define MAX_TIMEOUT_LENGTH      127
+#define TIME_OUT_INCREMENT        1016
+#define TIME_OUT_MULTIPLIER_8     8
+#define TIME_OUT_MULTIPLIER_16    16
+#define TIME_OUT_MULTIPLIER_32    32
+#define TIME_OUT_MULTIPLIER_64    64
+#define MAX_TIMEOUT_LENGTH        127
+#define DEFAULT_AUX_ENGINE_MULT   0
+#define DEFAULT_AUX_ENGINE_LENGTH 69
 
 static void release_engine(
 	struct dce_aux *engine)
@@ -322,7 +326,7 @@ static int read_channel_reply(struct dce_aux *engine, uint32_t size,
 	return 0;
 }
 
-static enum aux_channel_operation_result get_channel_status(
+static enum aux_return_code_type get_channel_status(
 	struct dce_aux *engine,
 	uint8_t *returned_bytes)
 {
@@ -333,7 +337,7 @@ static enum aux_channel_operation_result get_channel_status(
 	if (returned_bytes == NULL) {
 		/*caller pass NULL pointer*/
 		ASSERT_CRITICAL(false);
-		return AUX_CHANNEL_OPERATION_FAILED_REASON_UNKNOWN;
+		return AUX_RET_ERROR_UNKNOWN;
 	}
 	*returned_bytes = 0;
 
@@ -344,7 +348,7 @@ static enum aux_channel_operation_result get_channel_status(
 	value = REG_READ(AUX_SW_STATUS);
 	/* in case HPD is LOW, exit AUX transaction */
 	if ((value & AUX_SW_STATUS__AUX_SW_HPD_DISCON_MASK))
-		return AUX_CHANNEL_OPERATION_FAILED_HPD_DISCON;
+		return AUX_RET_ERROR_HPD_DISCON;
 
 	/* Note that the following bits are set in 'status.bits'
 	 * during CTS 4.2.1.2 (FW 3.3.1):
@@ -357,14 +361,14 @@ static enum aux_channel_operation_result get_channel_status(
 	if (value & AUX_SW_STATUS__AUX_SW_DONE_MASK) {
 		if ((value & AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_STATE_MASK) ||
 			(value & AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK))
-			return AUX_CHANNEL_OPERATION_FAILED_TIMEOUT;
+			return AUX_RET_ERROR_TIMEOUT;
 
 		else if ((value & AUX_SW_STATUS__AUX_SW_RX_INVALID_STOP_MASK) ||
 			(value & AUX_SW_STATUS__AUX_SW_RX_RECV_NO_DET_MASK) ||
 			(value &
 				AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_H_MASK) ||
 			(value & AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_L_MASK))
-			return AUX_CHANNEL_OPERATION_FAILED_INVALID_REPLY;
+			return AUX_RET_ERROR_INVALID_REPLY;
 
 		*returned_bytes = get_reg_field_value(value,
 				AUX_SW_STATUS,
@@ -372,24 +376,18 @@ static enum aux_channel_operation_result get_channel_status(
 
 		if (*returned_bytes == 0)
 			return
-			AUX_CHANNEL_OPERATION_FAILED_INVALID_REPLY;
+			AUX_RET_ERROR_INVALID_REPLY;
 		else {
 			*returned_bytes -= 1;
-			return AUX_CHANNEL_OPERATION_SUCCEEDED;
+			return AUX_RET_SUCCESS;
 		}
 	} else {
 		/*time_elapsed >= aux_engine->timeout_period
 		 *  AUX_SW_STATUS__AUX_SW_HPD_DISCON = at this point
 		 */
 		ASSERT_CRITICAL(false);
-		return AUX_CHANNEL_OPERATION_FAILED_TIMEOUT;
+		return AUX_RET_ERROR_TIMEOUT;
 	}
-}
-
-enum i2caux_engine_type get_engine_type(
-		const struct dce_aux *engine)
-{
-	return I2CAUX_ENGINE_TYPE_AUX;
 }
 
 static bool acquire(
@@ -398,7 +396,7 @@ static bool acquire(
 {
 	enum gpio_result result;
 
-	if (!is_engine_available(engine))
+	if ((engine == NULL) || !is_engine_available(engine))
 		return false;
 
 	result = dal_ddc_open(ddc, GPIO_MODE_HARDWARE,
@@ -427,11 +425,14 @@ void dce110_engine_destroy(struct dce_aux **engine)
 
 }
 
-static bool dce_aux_configure_timeout(struct ddc_service *ddc,
+static uint32_t dce_aux_configure_timeout(struct ddc_service *ddc,
 		uint32_t timeout_in_us)
 {
 	uint32_t multiplier = 0;
 	uint32_t length = 0;
+	uint32_t prev_length = 0;
+	uint32_t prev_mult = 0;
+	uint32_t prev_timeout_val = 0;
 	struct ddc *ddc_pin = ddc->ddc_pin;
 	struct dce_aux *aux_engine = ddc->ctx->dc->res_pool->engines[ddc_pin->pin_data->en];
 	struct aux_engine_dce110 *aux110 = FROM_AUX_ENGINE(aux_engine);
@@ -440,7 +441,10 @@ static bool dce_aux_configure_timeout(struct ddc_service *ddc,
 	aux110->polling_timeout_period = timeout_in_us * SW_AUX_TIMEOUT_PERIOD_MULTIPLIER;
 
 	/* 2-Update aux timeout period length and multiplier */
-	if (timeout_in_us <= TIME_OUT_INCREMENT) {
+	if (timeout_in_us == 0) {
+		multiplier = DEFAULT_AUX_ENGINE_MULT;
+		length = DEFAULT_AUX_ENGINE_LENGTH;
+	} else if (timeout_in_us <= TIME_OUT_INCREMENT) {
 		multiplier = 0;
 		length = timeout_in_us/TIME_OUT_MULTIPLIER_8;
 		if (timeout_in_us % TIME_OUT_MULTIPLIER_8 != 0)
@@ -464,9 +468,29 @@ static bool dce_aux_configure_timeout(struct ddc_service *ddc,
 
 	length = (length < MAX_TIMEOUT_LENGTH) ? length : MAX_TIMEOUT_LENGTH;
 
+	REG_GET_2(AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, &prev_length, AUX_RX_TIMEOUT_LEN_MUL, &prev_mult);
+
+	switch (prev_mult) {
+	case 0:
+		prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_8;
+		break;
+	case 1:
+		prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_16;
+		break;
+	case 2:
+		prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_32;
+		break;
+	case 3:
+		prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_64;
+		break;
+	default:
+		prev_timeout_val = DEFAULT_AUX_ENGINE_LENGTH * TIME_OUT_MULTIPLIER_8;
+		break;
+	}
+
 	REG_UPDATE_SEQ_2(AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, length, AUX_RX_TIMEOUT_LEN_MUL, multiplier);
 
-	return true;
+	return prev_timeout_val;
 }
 
 static struct dce_aux_funcs aux_functions = {
@@ -519,7 +543,7 @@ static enum i2caux_transaction_action i2caux_action_from_payload(struct aux_payl
 
 int dce_aux_transfer_raw(struct ddc_service *ddc,
 		struct aux_payload *payload,
-		enum aux_channel_operation_result *operation_result)
+		enum aux_return_code_type *operation_result)
 {
 	struct ddc *ddc_pin = ddc->ddc_pin;
 	struct dce_aux *aux_engine;
@@ -534,7 +558,7 @@ int dce_aux_transfer_raw(struct ddc_service *ddc,
 
 	aux_engine = ddc->ctx->dc->res_pool->engines[ddc_pin->pin_data->en];
 	if (!acquire(aux_engine, ddc_pin)) {
-		*operation_result = AUX_CHANNEL_OPERATION_FAILED_ENGINE_ACQUIRE;
+		*operation_result = AUX_RET_ERROR_ENGINE_ACQUIRE;
 		return -1;
 	}
 
@@ -553,8 +577,9 @@ int dce_aux_transfer_raw(struct ddc_service *ddc,
 	submit_channel_request(aux_engine, &aux_req);
 	*operation_result = get_channel_status(aux_engine, &returned_bytes);
 
-	if (*operation_result == AUX_CHANNEL_OPERATION_SUCCEEDED) {
-		int bytes_replied = 0;
+	if (*operation_result == AUX_RET_SUCCESS) {
+		int __maybe_unused bytes_replied = 0;
+
 		bytes_replied = read_channel_reply(aux_engine, payload->length,
 					 payload->data, payload->reply,
 					 &status);
@@ -582,7 +607,7 @@ bool dce_aux_transfer_with_retries(struct ddc_service *ddc,
 	int i, ret = 0;
 	uint8_t reply;
 	bool payload_reply = true;
-	enum aux_channel_operation_result operation_result;
+	enum aux_return_code_type operation_result;
 	bool retry_on_defer = false;
 
 	int aux_ack_retries = 0,
@@ -598,8 +623,9 @@ bool dce_aux_transfer_with_retries(struct ddc_service *ddc,
 
 	for (i = 0; i < AUX_MAX_RETRIES; i++) {
 		ret = dce_aux_transfer_raw(ddc, payload, &operation_result);
+
 		switch (operation_result) {
-		case AUX_CHANNEL_OPERATION_SUCCEEDED:
+		case AUX_RET_SUCCESS:
 			aux_timeout_retries = 0;
 			aux_invalid_reply_retries = 0;
 
@@ -617,15 +643,17 @@ bool dce_aux_transfer_with_retries(struct ddc_service *ddc,
 			case AUX_TRANSACTION_REPLY_AUX_DEFER:
 			case AUX_TRANSACTION_REPLY_I2C_OVER_AUX_DEFER:
 				retry_on_defer = true;
-				/* fall through */
+				fallthrough;
 			case AUX_TRANSACTION_REPLY_I2C_OVER_AUX_NACK:
 				if (++aux_defer_retries >= AUX_MAX_DEFER_RETRIES) {
 					goto fail;
 				} else {
 					if ((*payload->reply == AUX_TRANSACTION_REPLY_AUX_DEFER) ||
 						(*payload->reply == AUX_TRANSACTION_REPLY_I2C_OVER_AUX_DEFER)) {
-						if (payload->defer_delay > 0)
+						if (payload->defer_delay > 1)
 							msleep(payload->defer_delay);
+						else if (payload->defer_delay <= 1)
+							udelay(payload->defer_delay * 1000);
 					}
 				}
 				break;
@@ -643,14 +671,14 @@ bool dce_aux_transfer_with_retries(struct ddc_service *ddc,
 			}
 			break;
 
-		case AUX_CHANNEL_OPERATION_FAILED_INVALID_REPLY:
+		case AUX_RET_ERROR_INVALID_REPLY:
 			if (++aux_invalid_reply_retries >= AUX_MAX_INVALID_REPLY_RETRIES)
 				goto fail;
 			else
 				udelay(400);
 			break;
 
-		case AUX_CHANNEL_OPERATION_FAILED_TIMEOUT:
+		case AUX_RET_ERROR_TIMEOUT:
 			// Check whether a DEFER had occurred before the timeout.
 			// If so, treat timeout as a DEFER.
 			if (retry_on_defer) {
@@ -672,9 +700,9 @@ bool dce_aux_transfer_with_retries(struct ddc_service *ddc,
 			}
 			break;
 
-		case AUX_CHANNEL_OPERATION_FAILED_HPD_DISCON:
-		case AUX_CHANNEL_OPERATION_FAILED_ENGINE_ACQUIRE:
-		case AUX_CHANNEL_OPERATION_FAILED_REASON_UNKNOWN:
+		case AUX_RET_ERROR_HPD_DISCON:
+		case AUX_RET_ERROR_ENGINE_ACQUIRE:
+		case AUX_RET_ERROR_UNKNOWN:
 		default:
 			goto fail;
 		}

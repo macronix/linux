@@ -65,7 +65,7 @@ struct i915_sched_node {
 	struct list_head link;
 	struct i915_sched_attr attr;
 	unsigned int flags;
-#define I915_SCHED_HAS_SEMAPHORE_CHAIN	BIT(0)
+#define I915_SCHED_HAS_EXTERNAL_CHAIN	BIT(0)
 	intel_engine_mask_t semaphores;
 };
 
@@ -78,6 +78,17 @@ struct i915_dependency {
 	unsigned long flags;
 #define I915_DEPENDENCY_ALLOC		BIT(0)
 #define I915_DEPENDENCY_EXTERNAL	BIT(1)
+#define I915_DEPENDENCY_WEAK		BIT(2)
 };
+
+#define for_each_waiter(p__, rq__) \
+	list_for_each_entry_lockless(p__, \
+				     &(rq__)->sched.waiters_list, \
+				     wait_link)
+
+#define for_each_signaler(p__, rq__) \
+	list_for_each_entry_rcu(p__, \
+				&(rq__)->sched.signalers_list, \
+				signal_link)
 
 #endif /* _I915_SCHEDULER_TYPES_H_ */

@@ -209,7 +209,7 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 		dev_warn(&dev->pdev->dev,
 			 "invalid create queuepair flags %#x\n",
 			 init_attr->create_flags);
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EOPNOTSUPP);
 	}
 
 	if (init_attr->qp_type != IB_QPT_RC &&
@@ -217,7 +217,7 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 	    init_attr->qp_type != IB_QPT_GSI) {
 		dev_warn(&dev->pdev->dev, "queuepair type %d not supported\n",
 			 init_attr->qp_type);
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EOPNOTSUPP);
 	}
 
 	if (is_srq && !dev->dsr->caps.max_srq) {
@@ -232,13 +232,12 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 	switch (init_attr->qp_type) {
 	case IB_QPT_GSI:
 		if (init_attr->port_num == 0 ||
-		    init_attr->port_num > pd->device->phys_port_cnt ||
-		    udata) {
+		    init_attr->port_num > pd->device->phys_port_cnt) {
 			dev_warn(&dev->pdev->dev, "invalid queuepair attrs\n");
 			ret = -EINVAL;
 			goto err_qp;
 		}
-		/* fall through */
+		fallthrough;
 	case IB_QPT_RC:
 	case IB_QPT_UD:
 		qp = kzalloc(sizeof(*qp), GFP_KERNEL);
@@ -276,8 +275,9 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 
 			if (!is_srq) {
 				/* set qp->sq.wqe_cnt, shift, buf_size.. */
-				qp->rumem = ib_umem_get(udata, ucmd.rbuf_addr,
-							ucmd.rbuf_size, 0);
+				qp->rumem =
+					ib_umem_get(pd->device, ucmd.rbuf_addr,
+						    ucmd.rbuf_size, 0);
 				if (IS_ERR(qp->rumem)) {
 					ret = PTR_ERR(qp->rumem);
 					goto err_qp;
@@ -288,7 +288,7 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 				qp->srq = to_vsrq(init_attr->srq);
 			}
 
-			qp->sumem = ib_umem_get(udata, ucmd.sbuf_addr,
+			qp->sumem = ib_umem_get(pd->device, ucmd.sbuf_addr,
 						ucmd.sbuf_size, 0);
 			if (IS_ERR(qp->sumem)) {
 				if (!is_srq)
@@ -297,9 +297,11 @@ struct ib_qp *pvrdma_create_qp(struct ib_pd *pd,
 				goto err_qp;
 			}
 
-			qp->npages_send = ib_umem_page_count(qp->sumem);
+			qp->npages_send =
+				ib_umem_num_dma_blocks(qp->sumem, PAGE_SIZE);
 			if (!is_srq)
-				qp->npages_recv = ib_umem_page_count(qp->rumem);
+				qp->npages_recv = ib_umem_num_dma_blocks(
+					qp->rumem, PAGE_SIZE);
 			else
 				qp->npages_recv = 0;
 			qp->npages = qp->npages_send + qp->npages_recv;
@@ -541,6 +543,9 @@ int pvrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	struct pvrdma_cmd_modify_qp *cmd = &req.modify_qp;
 	enum ib_qp_state cur_state, next_state;
 	int ret;
+
+	if (attr_mask & ~IB_QP_ATTR_STANDARD_BITS)
+		return -EOPNOTSUPP;
 
 	/* Sanity checking. Should need lock here */
 	mutex_lock(&qp->mutex);
@@ -877,7 +882,7 @@ out:
 }
 
 /**
- * pvrdma_post_receive - post receive work request entries on a QP
+ * pvrdma_post_recv - post receive work request entries on a QP
  * @ibqp: the QP
  * @wr: the work request list to post
  * @bad_wr: the first bad WR returned

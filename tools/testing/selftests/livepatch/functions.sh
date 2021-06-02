@@ -7,6 +7,9 @@
 MAX_RETRIES=600
 RETRY_INTERVAL=".1"	# seconds
 
+# Kselftest framework requirement - SKIP code is 4
+ksft_skip=4
+
 # log(msg) - write message to kernel log
 #	msg - insightful words
 function log() {
@@ -18,7 +21,16 @@ function log() {
 function skip() {
 	log "SKIP: $1"
 	echo "SKIP: $1" >&2
-	exit 4
+	exit $ksft_skip
+}
+
+# root test
+function is_root() {
+	uid=$(id -u)
+	if [ $uid -ne 0 ]; then
+		echo "skip all tests: must be run as root" >&2
+		exit $ksft_skip
+	fi
 }
 
 # die(msg) - game over, man
@@ -27,6 +39,17 @@ function die() {
 	log "ERROR: $1"
 	echo "ERROR: $1" >&2
 	exit 1
+}
+
+# save existing dmesg so we can detect new content
+function save_dmesg() {
+	SAVED_DMESG=$(mktemp --tmpdir -t klp-dmesg-XXXXXX)
+	dmesg > "$SAVED_DMESG"
+}
+
+# cleanup temporary dmesg file from save_dmesg()
+function cleanup_dmesg_file() {
+	rm -f "$SAVED_DMESG"
 }
 
 function push_config() {
@@ -52,9 +75,14 @@ function set_dynamic_debug() {
 }
 
 function set_ftrace_enabled() {
-	local sysctl="$1"
-	result=$(sysctl kernel.ftrace_enabled="$1" 2>&1 | paste --serial --delimiters=' ')
+	result=$(sysctl -q kernel.ftrace_enabled="$1" 2>&1 && \
+		 sysctl kernel.ftrace_enabled 2>&1)
 	echo "livepatch: $result" > /dev/kmsg
+}
+
+function cleanup() {
+	pop_config
+	cleanup_dmesg_file
 }
 
 # setup_config - save the current config and set a script exit trap that
@@ -62,10 +90,11 @@ function set_ftrace_enabled() {
 #		 for verbose livepatching output and turn on
 #		 the ftrace_enabled sysctl.
 function setup_config() {
+	is_root
 	push_config
 	set_dynamic_debug
 	set_ftrace_enabled 1
-	trap pop_config EXIT INT TERM HUP
+	trap cleanup EXIT INT TERM HUP
 }
 
 # loop_until(cmd) - loop a command until it is successful or $MAX_RETRIES,
@@ -231,13 +260,28 @@ function set_pre_patch_ret {
 		die "failed to set pre_patch_ret parameter for $mod module"
 }
 
+function start_test {
+	local test="$1"
+
+	save_dmesg
+	echo -n "TEST: $test ... "
+	log "===== TEST: $test ====="
+}
+
 # check_result() - verify dmesg output
 #	TODO - better filter, out of order msgs, etc?
 function check_result {
 	local expect="$*"
 	local result
 
-	result=$(dmesg | grep -v 'tainting' | grep -e 'livepatch:' -e 'test_klp' | sed 's/^\[[ 0-9.]*\] //')
+	# Note: when comparing dmesg output, the kernel log timestamps
+	# help differentiate repeated testing runs.  Remove them with a
+	# post-comparison sed filter.
+
+	result=$(dmesg | comm --nocheck-order -13 "$SAVED_DMESG" - | \
+		 grep -e 'livepatch:' -e 'test_klp' | \
+		 grep -v '\(tainting\|taints\) kernel' | \
+		 sed 's/^\[[ 0-9.]*\] //')
 
 	if [[ "$expect" == "$result" ]] ; then
 		echo "ok"
@@ -245,4 +289,6 @@ function check_result {
 		echo -e "not ok\n\n$(diff -upr --label expected --label result <(echo "$expect") <(echo "$result"))\n"
 		die "livepatch kselftest(s) failed"
 	fi
+
+	cleanup_dmesg_file
 }

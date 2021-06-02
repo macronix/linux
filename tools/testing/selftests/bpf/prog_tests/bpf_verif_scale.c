@@ -48,6 +48,9 @@ void test_bpf_verif_scale(void)
 		{ "test_verif_scale2.o", BPF_PROG_TYPE_SCHED_CLS },
 		{ "test_verif_scale3.o", BPF_PROG_TYPE_SCHED_CLS },
 
+		{ "pyperf_global.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
+		{ "pyperf_subprogs.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
+
 		/* full unroll by llvm */
 		{ "pyperf50.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
 		{ "pyperf100.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
@@ -73,6 +76,7 @@ void test_bpf_verif_scale(void)
 		{ "loop2.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
 		{ "loop4.o", BPF_PROG_TYPE_SCHED_CLS },
 		{ "loop5.o", BPF_PROG_TYPE_SCHED_CLS },
+		{ "loop6.o", BPF_PROG_TYPE_KPROBE },
 
 		/* partial unroll. 19k insn in a loop.
 		 * Total program size 20.8k insn.
@@ -83,6 +87,9 @@ void test_bpf_verif_scale(void)
 		/* no unroll, tiny loops */
 		{ "strobemeta_nounroll1.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
 		{ "strobemeta_nounroll2.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
+
+		/* non-inlined subprogs */
+		{ "strobemeta_subprogs.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
 
 		{ "test_sysctl_loop1.o", BPF_PROG_TYPE_CGROUP_SYSCTL },
 		{ "test_sysctl_loop2.o", BPF_PROG_TYPE_CGROUP_SYSCTL },

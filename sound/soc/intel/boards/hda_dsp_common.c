@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //
 // Copyright(c) 2019 Intel Corporation. All rights reserved.
 
@@ -10,12 +10,14 @@
 
 #include "hda_dsp_common.h"
 
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)
+
 /*
  * Search card topology and return PCM device number
  * matching Nth HDMI device (zero-based index).
  */
-struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
-					int hdmi_idx)
+static struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
+					       int hdmi_idx)
 {
 	struct snd_soc_pcm_runtime *rtd;
 	struct snd_pcm *spcm;
@@ -34,7 +36,6 @@ struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
 	return NULL;
 }
 
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)
 /*
  * Search card topology and register HDMI PCM related controls
  * to codec driver.
@@ -63,7 +64,7 @@ int hda_dsp_hdmi_build_controls(struct snd_soc_card *card,
 				"%s: mapping HDMI converter %d to PCM %d (%p)\n",
 				__func__, i, hpcm->device, spcm);
 		} else {
-			hpcm->pcm = 0;
+			hpcm->pcm = NULL;
 			hpcm->device = SNDRV_PCM_INVALID_DEVICE;
 			dev_warn(card->dev,
 				 "%s: no PCM in topology for HDMI converter %d\n\n",

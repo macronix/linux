@@ -20,7 +20,7 @@
 #include <crypto/internal/des.h>
 #include <crypto/aes.h>
 #include <crypto/hmac.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
 #include <crypto/algapi.h>
 #include <crypto/internal/aead.h>
 #include <crypto/internal/skcipher.h>
@@ -265,7 +265,7 @@ static int setup_crypt_desc(void)
 	return 0;
 }
 
-static spinlock_t desc_lock;
+static DEFINE_SPINLOCK(desc_lock);
 static struct crypt_ctl *get_crypt_desc(void)
 {
 	int i;
@@ -293,7 +293,7 @@ static struct crypt_ctl *get_crypt_desc(void)
 	}
 }
 
-static spinlock_t emerg_lock;
+static DEFINE_SPINLOCK(emerg_lock);
 static struct crypt_ctl *get_crypt_desc_emerg(void)
 {
 	int i;
@@ -528,7 +528,7 @@ static void release_ixp_crypto(struct device *dev)
 
 	if (crypt_virt) {
 		dma_free_coherent(dev,
-			NPE_QLEN_TOTAL * sizeof( struct crypt_ctl),
+			NPE_QLEN * sizeof(struct crypt_ctl),
 			crypt_virt, crypt_phys);
 	}
 }
@@ -740,7 +740,7 @@ static int setup_cipher(struct crypto_tfm *tfm, int encrypt,
 	u32 keylen_cfg = 0;
 	struct ix_sa_dir *dir;
 	struct ixp_ctx *ctx = crypto_tfm_ctx(tfm);
-	u32 *flags = &tfm->crt_flags;
+	int err;
 
 	dir = encrypt ? &ctx->encrypt : &ctx->decrypt;
 	cinfo = dir->npe_ctx;
@@ -757,12 +757,13 @@ static int setup_cipher(struct crypto_tfm *tfm, int encrypt,
 		case 24: keylen_cfg = MOD_AES192; break;
 		case 32: keylen_cfg = MOD_AES256; break;
 		default:
-			*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
 			return -EINVAL;
 		}
 		cipher_cfg |= keylen_cfg;
 	} else {
-		crypto_des_verify_key(tfm, key);
+		err = crypto_des_verify_key(tfm, key);
+		if (err)
+			return err;
 	}
 	/* write cfg word to cryptinfo */
 	*(u32*)cinfo = cpu_to_be32(cipher_cfg);
@@ -819,7 +820,6 @@ static int ablk_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			unsigned int key_len)
 {
 	struct ixp_ctx *ctx = crypto_skcipher_ctx(tfm);
-	u32 *flags = &tfm->base.crt_flags;
 	int ret;
 
 	init_completion(&ctx->completion);
@@ -835,16 +835,6 @@ static int ablk_setkey(struct crypto_skcipher *tfm, const u8 *key,
 	if (ret)
 		goto out;
 	ret = setup_cipher(&tfm->base, 1, key, key_len);
-	if (ret)
-		goto out;
-
-	if (*flags & CRYPTO_TFM_RES_WEAK_KEY) {
-		if (*flags & CRYPTO_TFM_REQ_FORBID_WEAK_KEYS) {
-			ret = -EINVAL;
-		} else {
-			*flags &= ~CRYPTO_TFM_RES_WEAK_KEY;
-		}
-	}
 out:
 	if (!atomic_dec_and_test(&ctx->configuring))
 		wait_for_completion(&ctx->completion);
@@ -1096,7 +1086,6 @@ free_buf_src:
 static int aead_setup(struct crypto_aead *tfm, unsigned int authsize)
 {
 	struct ixp_ctx *ctx = crypto_aead_ctx(tfm);
-	u32 *flags = &tfm->base.crt_flags;
 	unsigned digest_len = crypto_aead_maxauthsize(tfm);
 	int ret;
 
@@ -1120,17 +1109,6 @@ static int aead_setup(struct crypto_aead *tfm, unsigned int authsize)
 		goto out;
 	ret = setup_auth(&tfm->base, 1, authsize,  ctx->authkey,
 			ctx->authkey_len, digest_len);
-	if (ret)
-		goto out;
-
-	if (*flags & CRYPTO_TFM_RES_WEAK_KEY) {
-		if (*flags & CRYPTO_TFM_REQ_FORBID_WEAK_KEYS) {
-			ret = -EINVAL;
-			goto out;
-		} else {
-			*flags &= ~CRYPTO_TFM_RES_WEAK_KEY;
-		}
-	}
 out:
 	if (!atomic_dec_and_test(&ctx->configuring))
 		wait_for_completion(&ctx->completion);
@@ -1169,7 +1147,6 @@ static int aead_setkey(struct crypto_aead *tfm, const u8 *key,
 	memzero_explicit(&keys, sizeof(keys));
 	return aead_setup(tfm, crypto_aead_authsize(tfm));
 badkey:
-	crypto_aead_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
 	memzero_explicit(&keys, sizeof(keys));
 	return -EINVAL;
 }
@@ -1402,9 +1379,6 @@ static int __init ixp_module_init(void)
 	if (IS_ERR(pdev))
 		return PTR_ERR(pdev);
 
-	spin_lock_init(&desc_lock);
-	spin_lock_init(&emerg_lock);
-
 	err = init_ixp_crypto(&pdev->dev);
 	if (err) {
 		platform_device_unregister(pdev);
@@ -1425,7 +1399,8 @@ static int __init ixp_module_init(void)
 
 		/* block ciphers */
 		cra->base.cra_flags = CRYPTO_ALG_KERN_DRIVER_ONLY |
-				      CRYPTO_ALG_ASYNC;
+				      CRYPTO_ALG_ASYNC |
+				      CRYPTO_ALG_ALLOCATES_MEMORY;
 		if (!cra->setkey)
 			cra->setkey = ablk_setkey;
 		if (!cra->encrypt)
@@ -1458,7 +1433,8 @@ static int __init ixp_module_init(void)
 
 		/* authenc */
 		cra->base.cra_flags = CRYPTO_ALG_KERN_DRIVER_ONLY |
-				      CRYPTO_ALG_ASYNC;
+				      CRYPTO_ALG_ASYNC |
+				      CRYPTO_ALG_ALLOCATES_MEMORY;
 		cra->setkey = cra->setkey ?: aead_setkey;
 		cra->setauthsize = aead_setauthsize;
 		cra->encrypt = aead_encrypt;

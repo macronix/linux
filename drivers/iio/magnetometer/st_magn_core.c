@@ -337,6 +337,7 @@ static const struct st_sensor_settings st_magn_sensors_settings[] = {
 		.sensors_supported = {
 			[0] = LSM303AGR_MAGN_DEV_NAME,
 			[1] = LIS2MDL_MAGN_DEV_NAME,
+			[2] = IIS2MDC_MAGN_DEV_NAME,
 		},
 		.ch = (struct iio_chan_spec *)st_magn_3_16bit_channels,
 		.odr = {
@@ -506,8 +507,7 @@ int st_magn_common_probe(struct iio_dev *indio_dev)
 	indio_dev->channels = mdata->sensor_settings->ch;
 	indio_dev->num_channels = ST_SENSORS_NUMBER_ALL_CHANNELS;
 
-	mdata->current_fullscale = (struct st_sensor_fullscale_avl *)
-					&mdata->sensor_settings->fs.fs_avl[0];
+	mdata->current_fullscale = &mdata->sensor_settings->fs.fs_avl[0];
 	mdata->odr = mdata->sensor_settings->odr.odr_avl[0].hz;
 
 	err = st_sensors_init_sensor(indio_dev, NULL);

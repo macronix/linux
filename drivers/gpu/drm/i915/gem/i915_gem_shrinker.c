@@ -12,8 +12,10 @@
 #include <linux/pci.h>
 #include <linux/dma-buf.h>
 #include <linux/vmalloc.h>
-#include <drm/i915_drm.h>
 
+#include "gt/intel_gt_requests.h"
+
+#include "dma_resv_utils.h"
 #include "i915_trace.h"
 
 static bool swap_available(void)
@@ -25,18 +27,6 @@ static bool can_release_pages(struct drm_i915_gem_object *obj)
 {
 	/* Consider only shrinkable ojects. */
 	if (!i915_gem_object_is_shrinkable(obj))
-		return false;
-
-	/*
-	 * Only report true if by unbinding the object and putting its pages
-	 * we can actually make forward progress towards freeing physical
-	 * pages.
-	 *
-	 * If the pages are pinned for any other reason than being bound
-	 * to the GPU, simply unbinding from the GPU is not going to succeed
-	 * in releasing our pin count on the pages themselves.
-	 */
-	if (atomic_read(&obj->mm.pages_pin_count) > atomic_read(&obj->bind_count))
 		return false;
 
 	/*
@@ -55,11 +45,13 @@ static bool unsafe_drop_pages(struct drm_i915_gem_object *obj,
 	flags = 0;
 	if (shrink & I915_SHRINK_ACTIVE)
 		flags = I915_GEM_OBJECT_UNBIND_ACTIVE;
+	if (!(shrink & I915_SHRINK_BOUND))
+		flags = I915_GEM_OBJECT_UNBIND_TEST;
 
 	if (i915_gem_object_unbind(obj, flags) == 0)
-		__i915_gem_object_put_pages(obj, I915_MM_SHRINKER);
+		return true;
 
-	return !i915_gem_object_has_pages(obj);
+	return false;
 }
 
 static void try_to_writeback(struct drm_i915_gem_object *obj,
@@ -78,6 +70,7 @@ static void try_to_writeback(struct drm_i915_gem_object *obj,
 
 /**
  * i915_gem_shrink - Shrink buffer object caches
+ * @ww: i915 gem ww acquire ctx, or NULL
  * @i915: i915 device
  * @target: amount of memory to make available, in pages
  * @nr_scanned: optional output for number of pages scanned (incremental)
@@ -102,7 +95,8 @@ static void try_to_writeback(struct drm_i915_gem_object *obj,
  * The number of pages of backing storage actually released.
  */
 unsigned long
-i915_gem_shrink(struct drm_i915_private *i915,
+i915_gem_shrink(struct i915_gem_ww_ctx *ww,
+		struct drm_i915_private *i915,
 		unsigned long target,
 		unsigned long *nr_scanned,
 		unsigned int shrink)
@@ -121,15 +115,7 @@ i915_gem_shrink(struct drm_i915_private *i915,
 	intel_wakeref_t wakeref = 0;
 	unsigned long count = 0;
 	unsigned long scanned = 0;
-
-	/*
-	 * When shrinking the active list, we should also consider active
-	 * contexts. Active contexts are pinned until they are retired, and
-	 * so can not be simply unbound to retire and unpin their pages. To
-	 * shrink the contexts, we must wait until the gpu is idle and
-	 * completed its switch to the kernel context. In short, we do
-	 * not have a good mechanism for idling a specific context.
-	 */
+	int err;
 
 	trace_i915_gem_shrink(i915, target, shrink);
 
@@ -143,6 +129,20 @@ i915_gem_shrink(struct drm_i915_private *i915,
 		if (!wakeref)
 			shrink &= ~I915_SHRINK_BOUND;
 	}
+
+	/*
+	 * When shrinking the active list, we should also consider active
+	 * contexts. Active contexts are pinned until they are retired, and
+	 * so can not be simply unbound to retire and unpin their pages. To
+	 * shrink the contexts, we must wait until the gpu is idle and
+	 * completed its switch to the kernel context. In short, we do
+	 * not have a good mechanism for idling a specific context, but
+	 * what we can do is give them a kick so that we do not keep idle
+	 * contexts around longer than is necessary.
+	 */
+	if (shrink & I915_SHRINK_ACTIVE)
+		/* Retire requests to unpin all idle contexts */
+		intel_gt_retire_requests(&i915->gt);
 
 	/*
 	 * As we may completely rewrite the (un)bound list whilst unbinding
@@ -195,10 +195,6 @@ i915_gem_shrink(struct drm_i915_private *i915,
 			    i915_gem_object_is_framebuffer(obj))
 				continue;
 
-			if (!(shrink & I915_SHRINK_BOUND) &&
-			    atomic_read(&obj->bind_count))
-				continue;
-
 			if (!can_release_pages(obj))
 				continue;
 
@@ -207,24 +203,40 @@ i915_gem_shrink(struct drm_i915_private *i915,
 
 			spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
 
+			err = 0;
 			if (unsafe_drop_pages(obj, shrink)) {
 				/* May arrive from get_pages on another bo */
-				mutex_lock_nested(&obj->mm.lock,
-						  I915_MM_SHRINKER);
-				if (!i915_gem_object_has_pages(obj)) {
+				if (!ww) {
+					if (!i915_gem_object_trylock(obj))
+						goto skip;
+				} else {
+					err = i915_gem_object_lock(obj, ww);
+					if (err)
+						goto skip;
+				}
+
+				if (!__i915_gem_object_put_pages(obj)) {
 					try_to_writeback(obj, shrink);
 					count += obj->base.size >> PAGE_SHIFT;
 				}
-				mutex_unlock(&obj->mm.lock);
+				if (!ww)
+					i915_gem_object_unlock(obj);
 			}
 
+			dma_resv_prune(obj->base.resv);
+
 			scanned += obj->base.size >> PAGE_SHIFT;
+skip:
 			i915_gem_object_put(obj);
 
 			spin_lock_irqsave(&i915->mm.obj_lock, flags);
+			if (err)
+				break;
 		}
 		list_splice_tail(&still_in_list, phase->list);
 		spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
+		if (err)
+			return err;
 	}
 
 	if (shrink & I915_SHRINK_BOUND)
@@ -255,10 +267,9 @@ unsigned long i915_gem_shrink_all(struct drm_i915_private *i915)
 	unsigned long freed = 0;
 
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
-		freed = i915_gem_shrink(i915, -1UL, NULL,
+		freed = i915_gem_shrink(NULL, i915, -1UL, NULL,
 					I915_SHRINK_BOUND |
-					I915_SHRINK_UNBOUND |
-					I915_SHRINK_ACTIVE);
+					I915_SHRINK_UNBOUND);
 	}
 
 	return freed;
@@ -302,7 +313,7 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 
 	sc->nr_scanned = 0;
 
-	freed = i915_gem_shrink(i915,
+	freed = i915_gem_shrink(NULL, i915,
 				sc->nr_to_scan,
 				&sc->nr_scanned,
 				I915_SHRINK_BOUND |
@@ -311,7 +322,7 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 		intel_wakeref_t wakeref;
 
 		with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
-			freed += i915_gem_shrink(i915,
+			freed += i915_gem_shrink(NULL, i915,
 						 sc->nr_to_scan - sc->nr_scanned,
 						 &sc->nr_scanned,
 						 I915_SHRINK_ACTIVE |
@@ -336,8 +347,7 @@ i915_gem_shrinker_oom(struct notifier_block *nb, unsigned long event, void *ptr)
 
 	freed_pages = 0;
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
-					       I915_SHRINK_ACTIVE |
+		freed_pages += i915_gem_shrink(NULL, i915, -1UL, NULL,
 					       I915_SHRINK_BOUND |
 					       I915_SHRINK_UNBOUND |
 					       I915_SHRINK_WRITEBACK);
@@ -375,7 +385,7 @@ i915_gem_shrinker_vmap(struct notifier_block *nb, unsigned long event, void *ptr
 	intel_wakeref_t wakeref;
 
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
+		freed_pages += i915_gem_shrink(NULL, i915, -1UL, NULL,
 					       I915_SHRINK_BOUND |
 					       I915_SHRINK_UNBOUND |
 					       I915_SHRINK_VMAPS);
@@ -404,35 +414,30 @@ void i915_gem_driver_register__shrinker(struct drm_i915_private *i915)
 	i915->mm.shrinker.count_objects = i915_gem_shrinker_count;
 	i915->mm.shrinker.seeks = DEFAULT_SEEKS;
 	i915->mm.shrinker.batch = 4096;
-	WARN_ON(register_shrinker(&i915->mm.shrinker));
+	drm_WARN_ON(&i915->drm, register_shrinker(&i915->mm.shrinker));
 
 	i915->mm.oom_notifier.notifier_call = i915_gem_shrinker_oom;
-	WARN_ON(register_oom_notifier(&i915->mm.oom_notifier));
+	drm_WARN_ON(&i915->drm, register_oom_notifier(&i915->mm.oom_notifier));
 
 	i915->mm.vmap_notifier.notifier_call = i915_gem_shrinker_vmap;
-	WARN_ON(register_vmap_purge_notifier(&i915->mm.vmap_notifier));
+	drm_WARN_ON(&i915->drm,
+		    register_vmap_purge_notifier(&i915->mm.vmap_notifier));
 }
 
 void i915_gem_driver_unregister__shrinker(struct drm_i915_private *i915)
 {
-	WARN_ON(unregister_vmap_purge_notifier(&i915->mm.vmap_notifier));
-	WARN_ON(unregister_oom_notifier(&i915->mm.oom_notifier));
+	drm_WARN_ON(&i915->drm,
+		    unregister_vmap_purge_notifier(&i915->mm.vmap_notifier));
+	drm_WARN_ON(&i915->drm,
+		    unregister_oom_notifier(&i915->mm.oom_notifier));
 	unregister_shrinker(&i915->mm.shrinker);
 }
 
 void i915_gem_shrinker_taints_mutex(struct drm_i915_private *i915,
 				    struct mutex *mutex)
 {
-	bool unlock = false;
-
 	if (!IS_ENABLED(CONFIG_LOCKDEP))
 		return;
-
-	if (!lockdep_is_held_type(&i915->drm.struct_mutex, -1)) {
-		mutex_acquire(&i915->drm.struct_mutex.dep_map,
-			      I915_MM_NORMAL, 0, _RET_IP_);
-		unlock = true;
-	}
 
 	fs_reclaim_acquire(GFP_KERNEL);
 
@@ -440,9 +445,6 @@ void i915_gem_shrinker_taints_mutex(struct drm_i915_private *i915,
 	mutex_release(&mutex->dep_map, _RET_IP_);
 
 	fs_reclaim_release(GFP_KERNEL);
-
-	if (unlock)
-		mutex_release(&i915->drm.struct_mutex.dep_map, _RET_IP_);
 }
 
 #define obj_to_i915(obj__) to_i915((obj__)->base.dev)

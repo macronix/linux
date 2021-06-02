@@ -112,7 +112,7 @@ rk3399_vpu_mpeg2_dec_set_buffers(struct hantro_dev *vpu,
 	case V4L2_MPEG2_PICTURE_CODING_TYPE_B:
 		backward_addr = hantro_get_ref(ctx,
 					       slice_params->backward_ref_ts);
-		/* fall-through */
+		fallthrough;
 	case V4L2_MPEG2_PICTURE_CODING_TYPE_P:
 		forward_addr = hantro_get_ref(ctx,
 					      slice_params->forward_ref_ts);
@@ -169,7 +169,7 @@ void rk3399_vpu_mpeg2_dec_run(struct hantro_ctx *ctx)
 	src_buf = hantro_get_src_buf(ctx);
 	dst_buf = hantro_get_dst_buf(ctx);
 
-	hantro_prepare_run(ctx);
+	hantro_start_prepare_run(ctx);
 
 	slice_params = hantro_get_ctrl(ctx,
 				       V4L2_CID_MPEG_VIDEO_MPEG2_SLICE_PARAMS);
@@ -250,7 +250,7 @@ void rk3399_vpu_mpeg2_dec_run(struct hantro_ctx *ctx)
 					 sequence, picture, slice_params);
 
 	/* Kick the watchdog and start decoding */
-	hantro_finish_run(ctx);
+	hantro_end_prepare_run(ctx);
 
 	reg = vdpu_read(vpu, VDPU_SWREG(57)) | VDPU_REG_DEC_E(1);
 	vdpu_write(vpu, reg, VDPU_SWREG(57));

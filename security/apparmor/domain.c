@@ -10,12 +10,14 @@
 
 #include <linux/errno.h>
 #include <linux/fdtable.h>
+#include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/mount.h>
 #include <linux/syscalls.h>
 #include <linux/tracehook.h>
 #include <linux/personality.h>
 #include <linux/xattr.h>
+#include <linux/user_namespace.h>
 
 #include "include/audit.h"
 #include "include/apparmorfs.h"
@@ -40,8 +42,8 @@ void aa_free_domain_entries(struct aa_domain *domain)
 			return;
 
 		for (i = 0; i < domain->size; i++)
-			kzfree(domain->table[i]);
-		kzfree(domain->table);
+			kfree_sensitive(domain->table[i]);
+		kfree_sensitive(domain->table);
 		domain->table = NULL;
 	}
 }
@@ -317,19 +319,25 @@ static int aa_xattrs_match(const struct linux_binprm *bprm,
 
 	if (!bprm || !profile->xattr_count)
 		return 0;
+	might_sleep();
 
 	/* transition from exec match to xattr set */
-	state = aa_dfa_null_transition(profile->xmatch, state);
-
+	state = aa_dfa_outofband_transition(profile->xmatch, state);
 	d = bprm->file->f_path.dentry;
 
 	for (i = 0; i < profile->xattr_count; i++) {
-		size = vfs_getxattr_alloc(d, profile->xattrs[i], &value,
-					  value_size, GFP_KERNEL);
+		size = vfs_getxattr_alloc(&init_user_ns, d, profile->xattrs[i],
+					  &value, value_size, GFP_KERNEL);
 		if (size >= 0) {
 			u32 perm;
 
-			/* Check the xattr value, not just presence */
+			/*
+			 * Check the xattr presence before value. This ensure
+			 * that not present xattr can be distinguished from a 0
+			 * length value or rule that matches any value
+			 */
+			state = aa_dfa_null_transition(profile->xmatch, state);
+			/* Check xattr value */
 			state = aa_dfa_match_len(profile->xmatch, state, value,
 						 size);
 			perm = dfa_user_allow(profile->xmatch, state);
@@ -339,7 +347,7 @@ static int aa_xattrs_match(const struct linux_binprm *bprm,
 			}
 		}
 		/* transition to next element */
-		state = aa_dfa_null_transition(profile->xmatch, state);
+		state = aa_dfa_outofband_transition(profile->xmatch, state);
 		if (size < 0) {
 			/*
 			 * No xattr match, so verify if transition to
@@ -361,10 +369,11 @@ out:
 }
 
 /**
- * __attach_match_ - find an attachment match
+ * find_attach - do attachment search for unconfined processes
  * @bprm - binprm structure of transitioning task
- * @name - to match against  (NOT NULL)
+ * @ns: the current namespace  (NOT NULL)
  * @head - profile list to walk  (NOT NULL)
+ * @name - to match against  (NOT NULL)
  * @info - info message if there was an error (NOT NULL)
  *
  * Do a linear search on the profiles in the list.  There is a matching
@@ -374,12 +383,11 @@ out:
  *
  * Requires: @head not be shared or have appropriate locks held
  *
- * Returns: profile or NULL if no match found
+ * Returns: label or NULL if no match found
  */
-static struct aa_profile *__attach_match(const struct linux_binprm *bprm,
-					 const char *name,
-					 struct list_head *head,
-					 const char **info)
+static struct aa_label *find_attach(const struct linux_binprm *bprm,
+				    struct aa_ns *ns, struct list_head *head,
+				    const char *name, const char **info)
 {
 	int candidate_len = 0, candidate_xattrs = 0;
 	bool conflict = false;
@@ -388,6 +396,8 @@ static struct aa_profile *__attach_match(const struct linux_binprm *bprm,
 	AA_BUG(!name);
 	AA_BUG(!head);
 
+	rcu_read_lock();
+restart:
 	list_for_each_entry_rcu(profile, head, base.list) {
 		if (profile->label.flags & FLAG_NULL &&
 		    &profile->label == ns_unconfined(profile->ns))
@@ -413,16 +423,32 @@ static struct aa_profile *__attach_match(const struct linux_binprm *bprm,
 			perm = dfa_user_allow(profile->xmatch, state);
 			/* any accepting state means a valid match. */
 			if (perm & MAY_EXEC) {
-				int ret;
+				int ret = 0;
 
 				if (count < candidate_len)
 					continue;
 
-				ret = aa_xattrs_match(bprm, profile, state);
-				/* Fail matching if the xattrs don't match */
-				if (ret < 0)
-					continue;
+				if (bprm && profile->xattr_count) {
+					long rev = READ_ONCE(ns->revision);
 
+					if (!aa_get_profile_not0(profile))
+						goto restart;
+					rcu_read_unlock();
+					ret = aa_xattrs_match(bprm, profile,
+							      state);
+					rcu_read_lock();
+					aa_put_profile(profile);
+					if (rev !=
+					    READ_ONCE(ns->revision))
+						/* policy changed */
+						goto restart;
+					/*
+					 * Fail matching if the xattrs don't
+					 * match
+					 */
+					if (ret < 0)
+						continue;
+				}
 				/*
 				 * TODO: allow for more flexible best match
 				 *
@@ -445,43 +471,28 @@ static struct aa_profile *__attach_match(const struct linux_binprm *bprm,
 				candidate_xattrs = ret;
 				conflict = false;
 			}
-		} else if (!strcmp(profile->base.name, name))
+		} else if (!strcmp(profile->base.name, name)) {
 			/*
 			 * old exact non-re match, without conditionals such
 			 * as xattrs. no more searching required
 			 */
-			return profile;
+			candidate = profile;
+			goto out;
+		}
 	}
 
-	if (conflict) {
-		*info = "conflicting profile attachments";
+	if (!candidate || conflict) {
+		if (conflict)
+			*info = "conflicting profile attachments";
+		rcu_read_unlock();
 		return NULL;
 	}
 
-	return candidate;
-}
-
-/**
- * find_attach - do attachment search for unconfined processes
- * @bprm - binprm structure of transitioning task
- * @ns: the current namespace  (NOT NULL)
- * @list: list to search  (NOT NULL)
- * @name: the executable name to match against  (NOT NULL)
- * @info: info message if there was an error
- *
- * Returns: label or NULL if no match found
- */
-static struct aa_label *find_attach(const struct linux_binprm *bprm,
-				    struct aa_ns *ns, struct list_head *list,
-				    const char *name, const char **info)
-{
-	struct aa_profile *profile;
-
-	rcu_read_lock();
-	profile = aa_get_profile(__attach_match(bprm, name, list, info));
+out:
+	candidate = aa_get_newest_profile(candidate);
 	rcu_read_unlock();
 
-	return profile ? &profile->label : NULL;
+	return &candidate->label;
 }
 
 static const char *next_name(int xtype, const char *name)
@@ -568,7 +579,7 @@ static struct aa_label *x_to_label(struct aa_profile *profile,
 			stack = NULL;
 			break;
 		}
-		/* fall through - to X_NAME */
+		fallthrough;	/* to X_NAME */
 	case AA_X_NAME:
 		if (xindex & AA_X_CHILD)
 			/* released by caller */
@@ -616,8 +627,6 @@ static struct aa_label *profile_transition(struct aa_profile *profile,
 					   bool *secure_exec)
 {
 	struct aa_label *new = NULL;
-	struct aa_profile *component;
-	struct label_it i;
 	const char *info = NULL, *name = NULL, *target = NULL;
 	unsigned int state = profile->file.start;
 	struct aa_perms perms = {};
@@ -666,21 +675,6 @@ static struct aa_label *profile_transition(struct aa_profile *profile,
 			info = "profile transition not found";
 			/* remove MAY_EXEC to audit as failure */
 			perms.allow &= ~MAY_EXEC;
-		} else {
-			/* verify that each component's xattr requirements are
-			 * met, and fail execution otherwise
-			 */
-			label_for_each(i, new, component) {
-				if (aa_xattrs_match(bprm, component, state) <
-				    0) {
-					error = -EACCES;
-					info = "required xattrs not present";
-					perms.allow &= ~MAY_EXEC;
-					aa_put_label(new);
-					new = NULL;
-					goto audit;
-				}
-			}
 		}
 	} else if (COMPLAIN_MODE(profile)) {
 		/* no exec permission - learning mode */
@@ -850,14 +844,14 @@ static struct aa_label *handle_onexec(struct aa_label *label,
 }
 
 /**
- * apparmor_bprm_set_creds - set the new creds on the bprm struct
+ * apparmor_bprm_creds_for_exec - Update the new creds on the bprm struct
  * @bprm: binprm for the exec  (NOT NULL)
  *
  * Returns: %0 or error on failure
  *
  * TODO: once the other paths are done see if we can't refactor into a fn
  */
-int apparmor_bprm_set_creds(struct linux_binprm *bprm)
+int apparmor_bprm_creds_for_exec(struct linux_binprm *bprm)
 {
 	struct aa_task_ctx *ctx;
 	struct aa_label *label, *new = NULL;
@@ -866,13 +860,12 @@ int apparmor_bprm_set_creds(struct linux_binprm *bprm)
 	const char *info = NULL;
 	int error = 0;
 	bool unsafe = false;
+	kuid_t i_uid = i_uid_into_mnt(file_mnt_user_ns(bprm->file),
+				      file_inode(bprm->file));
 	struct path_cond cond = {
-		file_inode(bprm->file)->i_uid,
+		i_uid,
 		file_inode(bprm->file)->i_mode
 	};
-
-	if (bprm->called_set_creds)
-		return 0;
 
 	ctx = task_ctx(current);
 	AA_BUG(!cred_label(bprm->cred));
@@ -925,7 +918,8 @@ int apparmor_bprm_set_creds(struct linux_binprm *bprm)
 	 * aways results in a further reduction of permissions.
 	 */
 	if ((bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS) &&
-	    !unconfined(label) && !aa_label_is_subset(new, ctx->nnp)) {
+	    !unconfined(label) &&
+	    !aa_label_is_unconfined_subset(new, ctx->nnp)) {
 		error = -EPERM;
 		info = "no new privs";
 		goto audit;
@@ -977,8 +971,7 @@ audit:
 	error = fn_for_each(label, profile,
 			aa_audit_file(profile, &nullperms, OP_EXEC, MAY_EXEC,
 				      bprm->filename, NULL, new,
-				      file_inode(bprm->file)->i_uid, info,
-				      error));
+				      i_uid, info, error));
 	aa_put_label(new);
 	goto done;
 }
@@ -1203,7 +1196,7 @@ int aa_change_hat(const char *hats[], int count, u64 token, int flags)
 		 * reduce restrictions.
 		 */
 		if (task_no_new_privs(current) && !unconfined(label) &&
-		    !aa_label_is_subset(new, ctx->nnp)) {
+		    !aa_label_is_unconfined_subset(new, ctx->nnp)) {
 			/* not an apparmor denial per se, so don't log it */
 			AA_DEBUG("no_new_privs - change_hat denied");
 			error = -EPERM;
@@ -1224,7 +1217,7 @@ int aa_change_hat(const char *hats[], int count, u64 token, int flags)
 		 * reduce restrictions.
 		 */
 		if (task_no_new_privs(current) && !unconfined(label) &&
-		    !aa_label_is_subset(previous, ctx->nnp)) {
+		    !aa_label_is_unconfined_subset(previous, ctx->nnp)) {
 			/* not an apparmor denial per se, so don't log it */
 			AA_DEBUG("no_new_privs - change_hat denied");
 			error = -EPERM;
@@ -1324,6 +1317,7 @@ int aa_change_profile(const char *fqname, int flags)
 		ctx->nnp = aa_get_label(label);
 
 	if (!fqname || !*fqname) {
+		aa_put_label(label);
 		AA_DEBUG("no profile name");
 		return -EINVAL;
 	}
@@ -1341,8 +1335,6 @@ int aa_change_profile(const char *fqname, int flags)
 		else
 			op = OP_CHANGE_PROFILE;
 	}
-
-	label = aa_get_current_label();
 
 	if (*fqname == '&') {
 		stack = true;
@@ -1420,7 +1412,7 @@ check:
 		 * reduce restrictions.
 		 */
 		if (task_no_new_privs(current) && !unconfined(label) &&
-		    !aa_label_is_subset(new, ctx->nnp)) {
+		    !aa_label_is_unconfined_subset(new, ctx->nnp)) {
 			/* not an apparmor denial per se, so don't log it */
 			AA_DEBUG("no_new_privs - change_hat denied");
 			error = -EPERM;

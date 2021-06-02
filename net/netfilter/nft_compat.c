@@ -213,6 +213,17 @@ static int nft_parse_compat(const struct nlattr *attr, u16 *proto, bool *inv)
 	return 0;
 }
 
+static void nft_compat_wait_for_destructors(void)
+{
+	/* xtables matches or targets can have side effects, e.g.
+	 * creation/destruction of /proc files.
+	 * The xt ->destroy functions are run asynchronously from
+	 * work queue.  If we have pending invocations we thus
+	 * need to wait for those to finish.
+	 */
+	nf_tables_trans_destroy_flush_work();
+}
+
 static int
 nft_target_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 		const struct nlattr * const tb[])
@@ -236,6 +247,8 @@ nft_target_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 
 	nft_target_set_tgchk_param(&par, ctx, target, info, &e, proto, inv);
 
+	nft_compat_wait_for_destructors();
+
 	ret = xt_check_target(&par, size, proto, inv);
 	if (ret < 0)
 		return ret;
@@ -245,6 +258,12 @@ nft_target_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 		return -EINVAL;
 
 	return 0;
+}
+
+static void __nft_mt_tg_destroy(struct module *me, const struct nft_expr *expr)
+{
+	module_put(me);
+	kfree(expr->ops);
 }
 
 static void
@@ -262,8 +281,7 @@ nft_target_destroy(const struct nft_ctx *ctx, const struct nft_expr *expr)
 	if (par.target->destroy != NULL)
 		par.target->destroy(&par);
 
-	module_put(me);
-	kfree(expr->ops);
+	__nft_mt_tg_destroy(me, expr);
 }
 
 static int nft_extension_dump_info(struct sk_buff *skb, int attr,
@@ -451,6 +469,8 @@ __nft_match_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 
 	nft_match_set_mtchk_param(&par, ctx, match, info, &e, proto, inv);
 
+	nft_compat_wait_for_destructors();
+
 	return xt_check_match(&par, size, proto, inv);
 }
 
@@ -494,8 +514,7 @@ __nft_match_destroy(const struct nft_ctx *ctx, const struct nft_expr *expr,
 	if (par.match->destroy != NULL)
 		par.match->destroy(&par);
 
-	module_put(me);
-	kfree(expr->ops);
+	__nft_mt_tg_destroy(me, expr);
 }
 
 static void
@@ -572,18 +591,13 @@ nfnl_compat_fill_info(struct sk_buff *skb, u32 portid, u32 seq, u32 type,
 		      int rev, int target)
 {
 	struct nlmsghdr *nlh;
-	struct nfgenmsg *nfmsg;
 	unsigned int flags = portid ? NLM_F_MULTI : 0;
 
 	event = nfnl_msg_type(NFNL_SUBSYS_NFT_COMPAT, event);
-	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*nfmsg), flags);
-	if (nlh == NULL)
+	nlh = nfnl_msg_put(skb, portid, seq, event, flags, family,
+			   NFNETLINK_V0, 0);
+	if (!nlh)
 		goto nlmsg_failure;
-
-	nfmsg = nlmsg_data(nlh);
-	nfmsg->nfgen_family = family;
-	nfmsg->version = NFNETLINK_V0;
-	nfmsg->res_id = 0;
 
 	if (nla_put_string(skb, NFTA_COMPAT_NAME, name) ||
 	    nla_put_be32(skb, NFTA_COMPAT_REV, htonl(rev)) ||
@@ -599,17 +613,15 @@ nla_put_failure:
 	return -1;
 }
 
-static int nfnl_compat_get_rcu(struct net *net, struct sock *nfnl,
-			       struct sk_buff *skb, const struct nlmsghdr *nlh,
-			       const struct nlattr * const tb[],
-			       struct netlink_ext_ack *extack)
+static int nfnl_compat_get_rcu(struct sk_buff *skb,
+			       const struct nfnl_info *info,
+			       const struct nlattr * const tb[])
 {
-	int ret = 0, target;
 	struct nfgenmsg *nfmsg;
-	const char *fmt;
-	const char *name;
-	u32 rev;
+	const char *name, *fmt;
 	struct sk_buff *skb2;
+	int ret = 0, target;
+	u32 rev;
 
 	if (tb[NFTA_COMPAT_NAME] == NULL ||
 	    tb[NFTA_COMPAT_REV] == NULL ||
@@ -620,7 +632,7 @@ static int nfnl_compat_get_rcu(struct net *net, struct sock *nfnl,
 	rev = ntohl(nla_get_be32(tb[NFTA_COMPAT_REV]));
 	target = ntohl(nla_get_be32(tb[NFTA_COMPAT_TYPE]));
 
-	nfmsg = nlmsg_data(nlh);
+	nfmsg = nlmsg_data(info->nlh);
 
 	switch(nfmsg->nfgen_family) {
 	case AF_INET:
@@ -659,8 +671,8 @@ static int nfnl_compat_get_rcu(struct net *net, struct sock *nfnl,
 
 	/* include the best revision for this extension in the message */
 	if (nfnl_compat_fill_info(skb2, NETLINK_CB(skb).portid,
-				  nlh->nlmsg_seq,
-				  NFNL_MSG_TYPE(nlh->nlmsg_type),
+				  info->nlh->nlmsg_seq,
+				  NFNL_MSG_TYPE(info->nlh->nlmsg_type),
 				  NFNL_MSG_COMPAT_GET,
 				  nfmsg->nfgen_family,
 				  name, ret, target) <= 0) {
@@ -668,8 +680,8 @@ static int nfnl_compat_get_rcu(struct net *net, struct sock *nfnl,
 		goto out_put;
 	}
 
-	ret = netlink_unicast(nfnl, skb2, NETLINK_CB(skb).portid,
-				MSG_DONTWAIT);
+	ret = netlink_unicast(info->sk, skb2, NETLINK_CB(skb).portid,
+			      MSG_DONTWAIT);
 	if (ret > 0)
 		ret = 0;
 out_put:
@@ -686,9 +698,12 @@ static const struct nla_policy nfnl_compat_policy_get[NFTA_COMPAT_MAX+1] = {
 };
 
 static const struct nfnl_callback nfnl_nft_compat_cb[NFNL_MSG_COMPAT_MAX] = {
-	[NFNL_MSG_COMPAT_GET]		= { .call_rcu = nfnl_compat_get_rcu,
-					    .attr_count = NFTA_COMPAT_MAX,
-					    .policy = nfnl_compat_policy_get },
+	[NFNL_MSG_COMPAT_GET]	= {
+		.call		= nfnl_compat_get_rcu,
+		.type		= NFNL_CB_RCU,
+		.attr_count	= NFTA_COMPAT_MAX,
+		.policy		= nfnl_compat_policy_get
+	},
 };
 
 static const struct nfnetlink_subsystem nfnl_compat_subsys = {
@@ -902,3 +917,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Pablo Neira Ayuso <pablo@netfilter.org>");
 MODULE_ALIAS_NFT_EXPR("match");
 MODULE_ALIAS_NFT_EXPR("target");
+MODULE_DESCRIPTION("x_tables over nftables support");

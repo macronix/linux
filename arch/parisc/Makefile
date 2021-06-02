@@ -21,8 +21,6 @@ KBUILD_IMAGE := vmlinuz
 
 NM		= sh $(srctree)/arch/parisc/nm
 CHECKFLAGS	+= -D__hppa__=1
-LIBGCC		= $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
-export LIBGCC
 
 ifdef CONFIG_64BIT
 UTS_MACHINE	:= parisc64
@@ -34,9 +32,16 @@ CC_ARCHES	= hppa hppa2.0 hppa1.1
 LD_BFD		:= elf32-hppa-linux
 endif
 
+# select defconfig based on actual architecture
+ifeq ($(shell uname -m),parisc64)
+	KBUILD_DEFCONFIG := generic-64bit_defconfig
+else
+	KBUILD_DEFCONFIG := generic-32bit_defconfig
+endif
+
 export LD_BFD
 
-ifneq ($(SUBARCH),$(UTS_MACHINE))
+ifdef cross_compiling
 	ifeq ($(CROSS_COMPILE),)
 		CC_SUFFIXES = linux linux-gnu unknown-linux-gnu
 		CROSS_COMPILE := $(call cc-cross-prefix, \
@@ -103,13 +108,13 @@ cflags-$(CONFIG_PA8X00)		+= -march=2.0 -mschedule=8000
 head-y			:= arch/parisc/kernel/head.o 
 
 KBUILD_CFLAGS	+= $(cflags-y)
+LIBGCC		:= $(shell $(CC) -print-libgcc-file-name)
+export LIBGCC
 
 kernel-y			:= mm/ kernel/ math-emu/
 
 core-y	+= $(addprefix arch/parisc/, $(kernel-y))
 libs-y	+= arch/parisc/lib/ $(LIBGCC)
-
-drivers-$(CONFIG_OPROFILE)		+= arch/parisc/oprofile/
 
 boot	:= arch/parisc/boot
 
@@ -155,7 +160,7 @@ vmlinuz: bzImage
 	$(OBJCOPY) $(boot)/bzImage $@
 else
 vmlinuz: vmlinux
-	@gzip -cf -9 $< > $@
+	@$(KGZIP) -cf -9 $< > $@
 endif
 
 install:

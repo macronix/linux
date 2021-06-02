@@ -568,8 +568,7 @@ vmci_transport_queue_pair_alloc(struct vmci_qp **qpair,
 			       peer, flags, VMCI_NO_PRIVILEGE_FLAGS);
 out:
 	if (err < 0) {
-		pr_err("Could not attach to queue pair with %d\n",
-		       err);
+		pr_err_once("Could not attach to queue pair with %d\n", err);
 		err = vmci_transport_error_to_vsock_error(err);
 	}
 
@@ -648,7 +647,7 @@ static int vmci_transport_recv_dgram_cb(void *data, struct vmci_datagram *dg)
 static bool vmci_transport_stream_allow(u32 cid, u32 port)
 {
 	static const u32 non_socket_contexts[] = {
-		VMADDR_CID_RESERVED,
+		VMADDR_CID_LOCAL,
 	};
 	int i;
 
@@ -944,8 +943,6 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	u64 qp_size;
 	bool old_request = false;
 	bool old_pkt_proto = false;
-
-	err = 0;
 
 	/* Because we are in the listen state, we could be receiving a packet
 	 * for ourself or any previous connection requests that we received.
@@ -2055,7 +2052,7 @@ static bool vmci_check_transport(struct vsock_sock *vsk)
 	return vsk->transport == &vmci_transport;
 }
 
-void vmci_vsock_transport_cb(bool is_host)
+static void vmci_vsock_transport_cb(bool is_host)
 {
 	int features;
 

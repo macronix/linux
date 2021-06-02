@@ -15,7 +15,6 @@
 #include "i915_selftest.h"
 #include "gt/intel_timeline.h"
 #include "intel_engine_types.h"
-#include "intel_gpu_commands.h"
 #include "intel_workarounds.h"
 
 struct drm_printer;
@@ -28,6 +27,13 @@ struct intel_gt;
  */
 #define CACHELINE_BYTES 64
 #define CACHELINE_DWORDS (CACHELINE_BYTES / sizeof(u32))
+
+#define ENGINE_TRACE(e, fmt, ...) do {					\
+	const struct intel_engine_cs *e__ __maybe_unused = (e);		\
+	GEM_TRACE("%s %s: " fmt,					\
+		  dev_name(e__->i915->drm.dev), e__->name,		\
+		  ##__VA_ARGS__);					\
+} while (0)
 
 /*
  * The register defines to be used with the following macros need to accept a
@@ -100,7 +106,20 @@ execlists_num_ports(const struct intel_engine_execlists * const execlists)
 static inline struct i915_request *
 execlists_active(const struct intel_engine_execlists *execlists)
 {
-	return *READ_ONCE(execlists->active);
+	struct i915_request * const *cur, * const *old, *active;
+
+	cur = READ_ONCE(execlists->active);
+	smp_rmb(); /* pairs with overwrite protection in process_csb() */
+	do {
+		old = cur;
+
+		active = READ_ONCE(*cur);
+		cur = READ_ONCE(execlists->active);
+
+		smp_rmb(); /* and complete the seqlock retry */
+	} while (unlikely(cur != old));
+
+	return active;
 }
 
 static inline void
@@ -167,7 +186,6 @@ intel_write_status_page(struct intel_engine_cs *engine, int reg, u32 value)
 #define I915_GEM_HWS_SEQNO		0x40
 #define I915_GEM_HWS_SEQNO_ADDR		(I915_GEM_HWS_SEQNO * sizeof(u32))
 #define I915_GEM_HWS_SCRATCH		0x80
-#define I915_GEM_HWS_SCRATCH_ADDR	(I915_GEM_HWS_SCRATCH * sizeof(u32))
 
 #define I915_HWS_CSB_BUF0_INDEX		0x10
 #define I915_HWS_CSB_WRITE_INDEX	0x1f
@@ -177,15 +195,19 @@ void intel_engine_stop(struct intel_engine_cs *engine);
 void intel_engine_cleanup(struct intel_engine_cs *engine);
 
 int intel_engines_init_mmio(struct intel_gt *gt);
-int intel_engines_setup(struct intel_gt *gt);
 int intel_engines_init(struct intel_gt *gt);
-void intel_engines_cleanup(struct intel_gt *gt);
+
+void intel_engine_free_request_pool(struct intel_engine_cs *engine);
+
+void intel_engines_release(struct intel_gt *gt);
+void intel_engines_free(struct intel_gt *gt);
 
 int intel_engine_init_common(struct intel_engine_cs *engine);
 void intel_engine_cleanup_common(struct intel_engine_cs *engine);
 
+int intel_engine_resume(struct intel_engine_cs *engine);
+
 int intel_ring_submission_setup(struct intel_engine_cs *engine);
-int intel_ring_submission_init(struct intel_engine_cs *engine);
 
 int intel_engine_stop_cs(struct intel_engine_cs *engine);
 void intel_engine_cancel_stop_cs(struct intel_engine_cs *engine);
@@ -195,89 +217,27 @@ void intel_engine_set_hwsp_writemask(struct intel_engine_cs *engine, u32 mask);
 u64 intel_engine_get_active_head(const struct intel_engine_cs *engine);
 u64 intel_engine_get_last_batch_head(const struct intel_engine_cs *engine);
 
-void intel_engine_get_instdone(struct intel_engine_cs *engine,
+void intel_engine_get_instdone(const struct intel_engine_cs *engine,
 			       struct intel_instdone *instdone);
 
 void intel_engine_init_execlists(struct intel_engine_cs *engine);
 
-void intel_engine_init_breadcrumbs(struct intel_engine_cs *engine);
-void intel_engine_fini_breadcrumbs(struct intel_engine_cs *engine);
-
-void intel_engine_disarm_breadcrumbs(struct intel_engine_cs *engine);
-
-static inline void
-intel_engine_queue_breadcrumbs(struct intel_engine_cs *engine)
-{
-	irq_work_queue(&engine->breadcrumbs.irq_work);
-}
-
-void intel_engine_breadcrumbs_irq(struct intel_engine_cs *engine);
-
-void intel_engine_reset_breadcrumbs(struct intel_engine_cs *engine);
-void intel_engine_fini_breadcrumbs(struct intel_engine_cs *engine);
-
-void intel_engine_print_breadcrumbs(struct intel_engine_cs *engine,
-				    struct drm_printer *p);
-
-static inline u32 *gen8_emit_pipe_control(u32 *batch, u32 flags, u32 offset)
-{
-	memset(batch, 0, 6 * sizeof(u32));
-
-	batch[0] = GFX_OP_PIPE_CONTROL(6);
-	batch[1] = flags;
-	batch[2] = offset;
-
-	return batch + 6;
-}
-
-static inline u32 *
-gen8_emit_ggtt_write_rcs(u32 *cs, u32 value, u32 gtt_offset, u32 flags)
-{
-	/* We're using qword write, offset should be aligned to 8 bytes. */
-	GEM_BUG_ON(!IS_ALIGNED(gtt_offset, 8));
-
-	/* w/a for post sync ops following a GPGPU operation we
-	 * need a prior CS_STALL, which is emitted by the flush
-	 * following the batch.
-	 */
-	*cs++ = GFX_OP_PIPE_CONTROL(6);
-	*cs++ = flags | PIPE_CONTROL_QW_WRITE | PIPE_CONTROL_GLOBAL_GTT_IVB;
-	*cs++ = gtt_offset;
-	*cs++ = 0;
-	*cs++ = value;
-	/* We're thrashing one dword of HWS. */
-	*cs++ = 0;
-
-	return cs;
-}
-
-static inline u32 *
-gen8_emit_ggtt_write(u32 *cs, u32 value, u32 gtt_offset, u32 flags)
-{
-	/* w/a: bit 5 needs to be zero for MI_FLUSH_DW address. */
-	GEM_BUG_ON(gtt_offset & (1 << 5));
-	/* Offset should be aligned to 8 bytes for both (QW/DW) write types */
-	GEM_BUG_ON(!IS_ALIGNED(gtt_offset, 8));
-
-	*cs++ = (MI_FLUSH_DW + 1) | MI_FLUSH_DW_OP_STOREDW | flags;
-	*cs++ = gtt_offset | MI_FLUSH_DW_USE_GTT;
-	*cs++ = 0;
-	*cs++ = value;
-
-	return cs;
-}
-
 static inline void __intel_engine_reset(struct intel_engine_cs *engine,
 					bool stalled)
 {
-	if (engine->reset.reset)
-		engine->reset.reset(engine, stalled);
+	if (engine->reset.rewind)
+		engine->reset.rewind(engine, stalled);
 	engine->serial++; /* contexts lost */
 }
 
 bool intel_engines_are_idle(struct intel_gt *gt);
 bool intel_engine_is_idle(struct intel_engine_cs *engine);
-void intel_engine_flush_submission(struct intel_engine_cs *engine);
+
+void __intel_engine_flush_submission(struct intel_engine_cs *engine, bool sync);
+static inline void intel_engine_flush_submission(struct intel_engine_cs *engine)
+{
+	__intel_engine_flush_submission(engine, true);
+}
 
 void intel_engines_reset_default_submission(struct intel_gt *gt);
 
@@ -288,35 +248,13 @@ void intel_engine_dump(struct intel_engine_cs *engine,
 		       struct drm_printer *m,
 		       const char *header, ...);
 
-int intel_enable_engine_stats(struct intel_engine_cs *engine);
-void intel_disable_engine_stats(struct intel_engine_cs *engine);
-
-ktime_t intel_engine_get_busy_time(struct intel_engine_cs *engine);
+ktime_t intel_engine_get_busy_time(struct intel_engine_cs *engine,
+				   ktime_t *now);
 
 struct i915_request *
 intel_engine_find_active_request(struct intel_engine_cs *engine);
 
-u32 intel_engine_context_size(struct drm_i915_private *i915, u8 class);
-
-#if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)
-
-static inline bool inject_preempt_hang(struct intel_engine_execlists *execlists)
-{
-	if (!execlists->preempt_hang.inject_hang)
-		return false;
-
-	complete(&execlists->preempt_hang.completion);
-	return true;
-}
-
-#else
-
-static inline bool inject_preempt_hang(struct intel_engine_execlists *execlists)
-{
-	return false;
-}
-
-#endif
+u32 intel_engine_context_size(struct intel_gt *gt, u8 class);
 
 void intel_engine_init_active(struct intel_engine_cs *engine,
 			      unsigned int subclass);
@@ -334,12 +272,12 @@ intel_engine_has_preempt_reset(const struct intel_engine_cs *engine)
 }
 
 static inline bool
-intel_engine_has_timeslices(const struct intel_engine_cs *engine)
+intel_engine_has_heartbeat(const struct intel_engine_cs *engine)
 {
-	if (!IS_ACTIVE(CONFIG_DRM_I915_TIMESLICE_DURATION))
+	if (!IS_ACTIVE(CONFIG_DRM_I915_HEARTBEAT_INTERVAL))
 		return false;
 
-	return intel_engine_has_semaphores(engine);
+	return READ_ONCE(engine->props.heartbeat_interval_ms);
 }
 
 #endif /* _INTEL_RINGBUFFER_H_ */

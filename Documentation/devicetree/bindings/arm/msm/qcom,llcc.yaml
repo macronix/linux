@@ -22,7 +22,10 @@ properties:
   compatible:
     enum:
       - qcom,sc7180-llcc
+      - qcom,sc7280-llcc
       - qcom,sdm845-llcc
+      - qcom,sm8150-llcc
+      - qcom,sm8250-llcc
 
   reg:
     items:
@@ -43,11 +46,13 @@ required:
   - reg-names
   - interrupts
 
+additionalProperties: false
+
 examples:
   - |
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
-    cache-controller@1100000 {
+    system-cache-controller@1100000 {
       compatible = "qcom,sdm845-llcc";
       reg = <0x1100000 0x200000>, <0x1300000 0x50000> ;
       reg-names = "llcc_base", "llcc_broadcast_base";

@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2019 Intel Corporation
  */
 
@@ -27,5 +26,6 @@ int intel_gt_wait_for_idle(struct intel_gt *gt, long timeout);
 void intel_gt_init_requests(struct intel_gt *gt);
 void intel_gt_park_requests(struct intel_gt *gt);
 void intel_gt_unpark_requests(struct intel_gt *gt);
+void intel_gt_fini_requests(struct intel_gt *gt);
 
 #endif /* INTEL_GT_REQUESTS_H */

@@ -1488,7 +1488,7 @@ static void usb3_start_pipen(struct renesas_usb3_ep *usb3_ep,
 			     struct renesas_usb3_request *usb3_req)
 {
 	struct renesas_usb3 *usb3 = usb3_ep_to_usb3(usb3_ep);
-	struct renesas_usb3_request *usb3_req_first = usb3_get_request(usb3_ep);
+	struct renesas_usb3_request *usb3_req_first;
 	unsigned long flags;
 	int ret = -EAGAIN;
 	u32 enable_bits = 0;
@@ -1496,7 +1496,8 @@ static void usb3_start_pipen(struct renesas_usb3_ep *usb3_ep,
 	spin_lock_irqsave(&usb3->lock, flags);
 	if (usb3_ep->halt || usb3_ep->started)
 		goto out;
-	if (usb3_req != usb3_req_first)
+	usb3_req_first = __usb3_get_request(usb3_ep);
+	if (!usb3_req_first || usb3_req != usb3_req_first)
 		goto out;
 
 	if (usb3_pn_change(usb3, usb3_ep->num) < 0)
@@ -2355,14 +2356,14 @@ static const struct usb_gadget_ops renesas_usb3_gadget_ops = {
 	.set_selfpowered	= renesas_usb3_set_selfpowered,
 };
 
-static enum usb_role renesas_usb3_role_switch_get(struct device *dev)
+static enum usb_role renesas_usb3_role_switch_get(struct usb_role_switch *sw)
 {
-	struct renesas_usb3 *usb3 = dev_get_drvdata(dev);
+	struct renesas_usb3 *usb3 = usb_role_switch_get_drvdata(sw);
 	enum usb_role cur_role;
 
-	pm_runtime_get_sync(dev);
+	pm_runtime_get_sync(usb3_to_dev(usb3));
 	cur_role = usb3_is_host(usb3) ? USB_ROLE_HOST : USB_ROLE_DEVICE;
-	pm_runtime_put(dev);
+	pm_runtime_put(usb3_to_dev(usb3));
 
 	return cur_role;
 }
@@ -2372,7 +2373,7 @@ static void handle_ext_role_switch_states(struct device *dev,
 {
 	struct renesas_usb3 *usb3 = dev_get_drvdata(dev);
 	struct device *host = usb3->host_dev;
-	enum usb_role cur_role = renesas_usb3_role_switch_get(dev);
+	enum usb_role cur_role = renesas_usb3_role_switch_get(usb3->role_sw);
 
 	switch (role) {
 	case USB_ROLE_NONE:
@@ -2424,7 +2425,7 @@ static void handle_role_switch_states(struct device *dev,
 {
 	struct renesas_usb3 *usb3 = dev_get_drvdata(dev);
 	struct device *host = usb3->host_dev;
-	enum usb_role cur_role = renesas_usb3_role_switch_get(dev);
+	enum usb_role cur_role = renesas_usb3_role_switch_get(usb3->role_sw);
 
 	if (cur_role == USB_ROLE_HOST && role == USB_ROLE_DEVICE) {
 		device_release_driver(host);
@@ -2438,19 +2439,19 @@ static void handle_role_switch_states(struct device *dev,
 	}
 }
 
-static int renesas_usb3_role_switch_set(struct device *dev,
+static int renesas_usb3_role_switch_set(struct usb_role_switch *sw,
 					enum usb_role role)
 {
-	struct renesas_usb3 *usb3 = dev_get_drvdata(dev);
+	struct renesas_usb3 *usb3 = usb_role_switch_get_drvdata(sw);
 
-	pm_runtime_get_sync(dev);
+	pm_runtime_get_sync(usb3_to_dev(usb3));
 
 	if (usb3->role_sw_by_connector)
-		handle_ext_role_switch_states(dev, role);
+		handle_ext_role_switch_states(usb3_to_dev(usb3), role);
 	else
-		handle_role_switch_states(dev, role);
+		handle_role_switch_states(usb3_to_dev(usb3), role);
 
-	pm_runtime_put(dev);
+	pm_runtime_put(usb3_to_dev(usb3));
 
 	return 0;
 }
@@ -2831,6 +2832,8 @@ static int renesas_usb3_probe(struct platform_device *pdev)
 		renesas_usb3_role_switch_desc.fwnode = dev_fwnode(&pdev->dev);
 	}
 
+	renesas_usb3_role_switch_desc.driver_data = usb3;
+
 	INIT_WORK(&usb3->role_work, renesas_usb3_role_work);
 	usb3->role_sw = usb_role_switch_register(&pdev->dev,
 					&renesas_usb3_role_switch_desc);
@@ -2906,7 +2909,7 @@ static struct platform_driver renesas_usb3_driver = {
 	.probe		= renesas_usb3_probe,
 	.remove		= renesas_usb3_remove,
 	.driver		= {
-		.name =	(char *)udc_name,
+		.name =	udc_name,
 		.pm		= &renesas_usb3_pm_ops,
 		.of_match_table = of_match_ptr(usb3_of_match),
 	},

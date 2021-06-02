@@ -430,8 +430,9 @@ static int mtk_uart_apdma_terminate_all(struct dma_chan *chan)
 
 	spin_lock_irqsave(&c->vc.lock, flags);
 	vchan_get_all_descriptors(&c->vc, &head);
-	vchan_dma_desc_free_list(&c->vc, &head);
 	spin_unlock_irqrestore(&c->vc.lock, flags);
+
+	vchan_dma_desc_free_list(&c->vc, &head);
 
 	return 0;
 }
@@ -623,14 +624,9 @@ static int mtk_uart_apdma_runtime_suspend(struct device *dev)
 
 static int mtk_uart_apdma_runtime_resume(struct device *dev)
 {
-	int ret;
 	struct mtk_uart_apdmadev *mtkd = dev_get_drvdata(dev);
 
-	ret = clk_prepare_enable(mtkd->clk);
-	if (ret)
-		return ret;
-
-	return 0;
+	return clk_prepare_enable(mtkd->clk);
 }
 #endif /* CONFIG_PM */
 

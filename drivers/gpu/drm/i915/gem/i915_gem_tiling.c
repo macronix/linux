@@ -6,11 +6,11 @@
 
 #include <linux/string.h>
 #include <linux/bitops.h>
-#include <drm/i915_drm.h>
 
 #include "i915_drv.h"
 #include "i915_gem.h"
 #include "i915_gem_ioctls.h"
+#include "i915_gem_mman.h"
 #include "i915_gem_object.h"
 
 /**
@@ -182,21 +182,35 @@ i915_gem_object_fence_prepare(struct drm_i915_gem_object *obj,
 			      int tiling_mode, unsigned int stride)
 {
 	struct i915_ggtt *ggtt = &to_i915(obj->base.dev)->ggtt;
-	struct i915_vma *vma;
+	struct i915_vma *vma, *vn;
+	LIST_HEAD(unbind);
 	int ret = 0;
 
 	if (tiling_mode == I915_TILING_NONE)
 		return 0;
 
 	mutex_lock(&ggtt->vm.mutex);
+
+	spin_lock(&obj->vma.lock);
 	for_each_ggtt_vma(vma, obj) {
+		GEM_BUG_ON(vma->vm != &ggtt->vm);
+
 		if (i915_vma_fence_prepare(vma, tiling_mode, stride))
 			continue;
 
-		ret = __i915_vma_unbind(vma);
-		if (ret)
-			break;
+		list_move(&vma->vm_link, &unbind);
 	}
+	spin_unlock(&obj->vma.lock);
+
+	list_for_each_entry_safe(vma, vn, &unbind, vm_link) {
+		ret = __i915_vma_unbind(vma);
+		if (ret) {
+			/* Restore the remaining vma on an error */
+			list_splice(&unbind, &ggtt->vm.bound_list);
+			break;
+		}
+	}
+
 	mutex_unlock(&ggtt->vm.mutex);
 
 	return ret;
@@ -235,7 +249,7 @@ i915_gem_object_set_tiling(struct drm_i915_gem_object *obj,
 	 * whilst executing a fenced command for an untiled object.
 	 */
 
-	i915_gem_object_lock(obj);
+	i915_gem_object_lock(obj, NULL);
 	if (i915_gem_object_is_framebuffer(obj)) {
 		i915_gem_object_unlock(obj);
 		return -EBUSY;
@@ -251,23 +265,22 @@ i915_gem_object_set_tiling(struct drm_i915_gem_object *obj,
 	 * pages to prevent them being swapped out and causing corruption
 	 * due to the change in swizzling.
 	 */
-	mutex_lock(&obj->mm.lock);
 	if (i915_gem_object_has_pages(obj) &&
 	    obj->mm.madv == I915_MADV_WILLNEED &&
 	    i915->quirks & QUIRK_PIN_SWIZZLED_PAGES) {
 		if (tiling == I915_TILING_NONE) {
-			GEM_BUG_ON(!obj->mm.quirked);
-			__i915_gem_object_unpin_pages(obj);
-			obj->mm.quirked = false;
+			GEM_BUG_ON(!i915_gem_object_has_tiling_quirk(obj));
+			i915_gem_object_clear_tiling_quirk(obj);
+			i915_gem_object_make_shrinkable(obj);
 		}
 		if (!i915_gem_object_is_tiled(obj)) {
-			GEM_BUG_ON(obj->mm.quirked);
-			__i915_gem_object_pin_pages(obj);
-			obj->mm.quirked = true;
+			GEM_BUG_ON(i915_gem_object_has_tiling_quirk(obj));
+			i915_gem_object_make_unshrinkable(obj);
+			i915_gem_object_set_tiling_quirk(obj);
 		}
 	}
-	mutex_unlock(&obj->mm.lock);
 
+	spin_lock(&obj->vma.lock);
 	for_each_ggtt_vma(vma, obj) {
 		vma->fence_size =
 			i915_gem_fence_size(i915, vma->size, tiling, stride);
@@ -278,12 +291,13 @@ i915_gem_object_set_tiling(struct drm_i915_gem_object *obj,
 		if (vma->fence)
 			vma->fence->dirty = true;
 	}
+	spin_unlock(&obj->vma.lock);
 
 	obj->tiling_and_stride = tiling | stride;
 	i915_gem_object_unlock(obj);
 
 	/* Force the fence to be reacquired for GTT access */
-	i915_gem_object_release_mmap(obj);
+	i915_gem_object_release_mmap_gtt(obj);
 
 	/* Try to preallocate memory required to save swizzling on put-pages */
 	if (i915_gem_object_needs_bit17_swizzle(obj)) {

@@ -209,7 +209,7 @@ static void annotate_browser__draw_current_jump(struct ui_browser *browser)
 		ui_browser__mark_fused(browser,
 				       pcnt_width + 3 + notes->widths.addr + width,
 				       from - 1,
-				       to > from ? true : false);
+				       to > from);
 	}
 }
 
@@ -381,14 +381,31 @@ static bool annotate_browser__toggle_source(struct annotate_browser *browser)
 	return true;
 }
 
+#define SYM_TITLE_MAX_SIZE (PATH_MAX + 64)
+
+static void annotate_browser__show_full_location(struct ui_browser *browser)
+{
+	struct annotate_browser *ab = container_of(browser, struct annotate_browser, b);
+	struct disasm_line *cursor = disasm_line(ab->selection);
+	struct annotation_line *al = &cursor->al;
+
+	if (al->offset != -1)
+		ui_helpline__puts("Only available for source code lines.");
+	else if (al->fileloc == NULL)
+		ui_helpline__puts("No source file location.");
+	else {
+		char help_line[SYM_TITLE_MAX_SIZE];
+		sprintf (help_line, "Source file location: %s", al->fileloc);
+		ui_helpline__puts(help_line);
+	}
+}
+
 static void ui_browser__init_asm_mode(struct ui_browser *browser)
 {
 	struct annotation *notes = browser__annotation(browser);
 	ui_browser__reset_index(browser);
 	browser->nr_entries = notes->nr_asm_entries;
 }
-
-#define SYM_TITLE_MAX_SIZE (PATH_MAX + 64)
 
 static int sym_title(struct symbol *sym, struct map *map, char *title,
 		     size_t sz, int percent_type)
@@ -398,7 +415,7 @@ static int sym_title(struct symbol *sym, struct map *map, char *title,
 }
 
 /*
- * This can be called from external jumps, i.e. jumps from one functon
+ * This can be called from external jumps, i.e. jumps from one function
  * to another, like from the kernel's entry_SYSCALL_64 function to the
  * swapgs_restore_regs_and_return_to_usermode() function.
  *
@@ -747,6 +764,7 @@ static int annotate_browser__run(struct annotate_browser *browser,
 		"c             Show min/max cycle\n"
 		"/             Search string\n"
 		"k             Toggle line numbers\n"
+		"l             Show full source file location\n"
 		"P             Print to [symbol_name].annotation file.\n"
 		"r             Run available scripts\n"
 		"p             Toggle percent type [local/global]\n"
@@ -754,13 +772,15 @@ static int annotate_browser__run(struct annotate_browser *browser,
 		"?             Search string backwards\n");
 			continue;
 		case 'r':
-			{
-				script_browse(NULL, NULL);
-				continue;
-			}
+			script_browse(NULL, NULL);
+			annotate_browser__show(&browser->b, title, help);
+			continue;
 		case 'k':
 			notes->options->show_linenr = !notes->options->show_linenr;
-			break;
+			continue;
+		case 'l':
+			annotate_browser__show_full_location (&browser->b);
+			continue;
 		case 'H':
 			nd = browser->curr_hot;
 			break;
@@ -834,13 +854,13 @@ show_sup_ins:
 			map_symbol__annotation_dump(ms, evsel, browser->opts);
 			continue;
 		case 't':
-			if (notes->options->show_total_period) {
-				notes->options->show_total_period = false;
-				notes->options->show_nr_samples = true;
-			} else if (notes->options->show_nr_samples)
-				notes->options->show_nr_samples = false;
+			if (symbol_conf.show_total_period) {
+				symbol_conf.show_total_period = false;
+				symbol_conf.show_nr_samples = true;
+			} else if (symbol_conf.show_nr_samples)
+				symbol_conf.show_nr_samples = false;
 			else
-				notes->options->show_total_period = true;
+				symbol_conf.show_total_period = true;
 			annotation__update_column_widths(notes);
 			continue;
 		case 'c':

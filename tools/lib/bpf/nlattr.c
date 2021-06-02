@@ -7,11 +7,11 @@
  */
 
 #include <errno.h>
-#include "nlattr.h"
-#include "libbpf_internal.h"
-#include <linux/rtnetlink.h>
 #include <string.h>
 #include <stdio.h>
+#include <linux/rtnetlink.h>
+#include "nlattr.h"
+#include "libbpf_internal.h"
 
 static uint16_t nla_attr_minlen[LIBBPF_NLA_TYPE_MAX+1] = {
 	[LIBBPF_NLA_U8]		= sizeof(uint8_t),
