@@ -61,7 +61,7 @@ struct flash_info {
 	u16		page_size;
 	u16		addr_width;
 
-	u16		flags;
+	u32		flags;
 #define SECT_4K			BIT(0)	/* SPINOR_OP_BE_4K works uniformly */
 #define SPI_NOR_NO_ERASE	BIT(1)	/* No erase command needed */
 #define SST_WRITE		BIT(2)	/* use SST byte programming */
@@ -89,8 +89,11 @@ struct flash_info {
 #define NO_CHIP_ERASE		BIT(12) /* Chip does not support chip erase */
 #define SPI_NOR_SKIP_SFDP	BIT(13)	/* Skip parsing of SFDP tables */
 #define USE_CLSR		BIT(14)	/* use CLSR command */
+#define SPI_NOR_OCTAL_DTR_READ	BIT(15) /* Flash supports octal DTR Read. */
+#define SPI_NOR_OCTAL_DTR_PP	BIT(16) /* Flash supports Octal DTR Page Program */
 
 	int	(*quad_enable)(struct spi_nor *nor);
+	int	(*octal_dtr_enable)(struct spi_nor *nor);
 };
 
 #define JEDEC_MFR(info)	((info)->id[0])
@@ -106,6 +109,12 @@ static int read_sr(struct spi_nor *nor)
 {
 	int ret;
 	u8 val;
+
+	if (nor->reg_proto == SNOR_PROTO_8_8_8_DTR) {
+		nor->reg_addr_width = 4;
+		nor->reg_dummy = 4;
+		nor->reg_addr = SPINOR_REG_MXIC_SR_ADDR;
+	}
 
 	ret = nor->read_reg(nor, SPINOR_OP_RDSR, &val, 1);
 	if (ret < 0) {
@@ -145,6 +154,12 @@ static int read_cr(struct spi_nor *nor)
 	int ret;
 	u8 val;
 
+	if (nor->reg_proto == SNOR_PROTO_8_8_8_DTR) {
+		nor->reg_addr_width = 4;
+		nor->reg_dummy = 4;
+		nor->reg_addr = SPINOR_REG_MXIC_CR_ADDR;
+	}
+
 	ret = nor->read_reg(nor, SPINOR_OP_RDCR, &val, 1);
 	if (ret < 0) {
 		dev_err(nor->dev, "error %d reading CR\n", ret);
@@ -160,8 +175,53 @@ static int read_cr(struct spi_nor *nor)
  */
 static inline int write_sr(struct spi_nor *nor, u8 val)
 {
+	if (nor->reg_proto == SNOR_PROTO_8_8_8_DTR) {
+		nor->reg_addr_width = 4;
+		nor->reg_addr = SPINOR_REG_MXIC_SR_ADDR;
+	}
+
 	nor->cmd_buf[0] = val;
 	return nor->write_reg(nor, SPINOR_OP_WRSR, nor->cmd_buf, 1);
+}
+
+/*
+ * Read Configuration Register 2
+ * Returns negative if error occurred.
+ */
+static int read_cr2(struct spi_nor *nor, loff_t addr)
+{
+	int ret;
+	u8 val[2];
+
+	if (nor->reg_proto == SNOR_PROTO_8_8_8_DTR) {
+		nor->reg_addr_width = 4;
+		nor->reg_dummy = 4;
+		nor->reg_addr = addr;
+	}
+
+	ret = nor->read_reg(nor, SPINOR_OP_RDCR2, val, 2);
+	if (ret < 0) {
+		dev_err(nor->dev, "error %d reading CR2\n", ret);
+		return ret;
+	}
+
+	return val[0];
+}
+/*
+ * Write Configuration Register 2
+ * Returns negative if error occurred.
+ */
+static inline int write_cr2(struct spi_nor *nor, loff_t addr, u8 val)
+{
+	u8 addrval[5];
+
+	addrval[0] = (addr >> 24) & 0xff;
+	addrval[1] = (addr >> 16) & 0xff;
+	addrval[2] = (addr >> 8) & 0xff;
+	addrval[3] =  addr & 0xff;
+	addrval[4] =  val;
+
+	return nor->write_reg(nor, SPINOR_OP_WRCR2, addrval, 5);
 }
 
 /*
@@ -1095,6 +1155,32 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "mx66u51235f", INFO(0xc2253a, 0, 64 * 1024, 1024, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ | SPI_NOR_4B_OPCODES) },
 	{ "mx66l1g45g",  INFO(0xc2201b, 0, 64 * 1024, 2048, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
 	{ "mx66l1g55g",  INFO(0xc2261b, 0, 64 * 1024, 2048, SPI_NOR_QUAD_READ) },
+	/* OctaFlash series */
+	{ "mx66lm2g45g", INFO(0xc2853c, 0, 64 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66lm1g45g", INFO(0xc2853b, 0, 32 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66lw1g45g", INFO(0xc2863b, 0, 32 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25lm51245g", INFO(0xc2853a, 0, 16 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25lw51245g", INFO(0xc2863a, 0, 16 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25lm25645g", INFO(0xc28539, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25lw25645g", INFO(0xc28639, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66um2g45g", INFO(0xc2803c, 0, 64 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66uw2g345g", INFO(0xc2843c, 0, 64 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66uw2g345gx0", INFO(0xc2943c, 0, 64 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66um1g45g", INFO(0xc2803b, 0, 32 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66um1g45g40", INFO(0xc2808b, 0, 32 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx66uw1g45g", INFO(0xc2813b, 0, 32 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25um51245g", INFO(0xc2803a, 0, 16 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw51245g", INFO(0xc2813a, 0, 16 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw51345g", INFO(0xc2843a, 0, 16 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25um25645g", INFO(0xc28039, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw25645g", INFO(0xc28139, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25um25345g", INFO(0xc28339, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw25345g", INFO(0xc28439, 0, 8 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw12845g", INFO(0xc28138, 0, 4 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw12a45g", INFO(0xc28938, 0, 4 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw12345g", INFO(0xc28438, 0, 4 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw6445g", INFO(0xc28137, 0, 2 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
+	{ "mx25uw6345g", INFO(0xc28437, 0, 2 * 1024, 4096, SECT_4K | SPI_NOR_OCTAL_DTR_READ | SPI_NOR_OCTAL_DTR_PP | SPI_NOR_4B_OPCODES) },
 
 	/* Micron */
 	{ "n25q016a",	 INFO(0x20bb15, 0, 64 * 1024,   32, SECT_4K | SPI_NOR_QUAD_READ) },
@@ -1515,6 +1601,53 @@ static int macronix_quad_enable(struct spi_nor *nor)
 	return 0;
 }
 
+/**
+ * macronix_octal_dtr_enable() - Set octal dtr bit in Configuration Register 2.
+ * @nor:	pointer to a 'struct spi_nor'
+ *
+ * Set bit 0 to 1 is the SOPI bit for Macronix OcatFlash.
+ * Set bit 1 to 1 is the DOPI bit for Macronix OcatFlash.
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+static int macronix_octal_dtr_enable(struct spi_nor *nor, bool enable)
+{
+	int ret;
+
+	if (!(nor->read_proto == SNOR_PROTO_8_8_8_DTR &&
+	      nor->write_proto == SNOR_PROTO_8_8_8_DTR))
+		return 0;
+
+	if (enable) {
+		write_enable(nor);
+
+		ret = write_cr2(nor, SPINOR_REG_MXIC_CR2_MODE,
+				SPINOR_REG_MXIC_OPI_DTR_EN);
+		if (ret < 0) {
+			dev_err(nor->dev,
+				"error writing configuration register 2\n");
+			return -EINVAL;
+		}
+
+		nor->reg_proto = SNOR_PROTO_8_8_8_DTR;
+
+		ret = read_cr2(nor, SPINOR_REG_MXIC_CR2_MODE);
+		if (ret < 0) {
+			dev_err(nor->dev,
+				"error reading configuration register 2\n");
+			return -EINVAL;
+		}
+
+		if (!(ret & SPINOR_REG_MXIC_OPI_DTR_EN)) {
+			dev_err(nor->dev,
+				"Macronix Octal bit not set\n");
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
 /*
  * Write status Register and configuration register with 2 bytes
  * The first byte will be written to the status register, while the
@@ -1806,6 +1939,7 @@ enum spi_nor_read_command_index {
 	SNOR_CMD_READ_1_8_8,
 	SNOR_CMD_READ_8_8_8,
 	SNOR_CMD_READ_1_8_8_DTR,
+	SNOR_CMD_READ_8_8_8_DTR,
 
 	SNOR_CMD_READ_MAX
 };
@@ -1822,6 +1956,7 @@ enum spi_nor_pp_command_index {
 	SNOR_CMD_PP_1_1_8,
 	SNOR_CMD_PP_1_8_8,
 	SNOR_CMD_PP_8_8_8,
+	SNOR_CMD_PP_8_8_8_DTR,
 
 	SNOR_CMD_PP_MAX
 };
@@ -1835,6 +1970,7 @@ struct spi_nor_flash_parameter {
 	struct spi_nor_pp_command	page_programs[SNOR_CMD_PP_MAX];
 
 	int (*quad_enable)(struct spi_nor *nor);
+	int (*octal_dtr_enable)(struct spi_nor *nor, bool enable);
 };
 
 static void
@@ -2489,10 +2625,31 @@ static int spi_nor_init_params(struct spi_nor *nor,
 					  SNOR_PROTO_1_1_4);
 	}
 
+	/**
+	 * Set OCTAL DTR dummy to 20. If flash default dummy cycle is not 20,
+	 * need to modify.
+	 */
+	if (info->flags & SPI_NOR_OCTAL_DTR_READ) {
+		params->hwcaps.mask |= SNOR_HWCAPS_READ_8_8_8_DTR;
+		spi_nor_set_read_settings(&params->reads[SNOR_CMD_READ_8_8_8_DTR],
+					  0, 20, SPINOR_OP_READ_8_8_8_DTR,
+					  SNOR_PROTO_8_8_8_DTR);
+	}
+
 	/* Page Program settings. */
 	params->hwcaps.mask |= SNOR_HWCAPS_PP;
 	spi_nor_set_pp_settings(&params->page_programs[SNOR_CMD_PP],
 				SPINOR_OP_PP, SNOR_PROTO_1_1_1);
+
+	if (info->flags & SPI_NOR_OCTAL_DTR_PP) {
+		params->hwcaps.mask |= SNOR_HWCAPS_PP_8_8_8_DTR;
+		/*
+		 * Since xSPI Page Program opcode is backward compatible with
+		 * Legacy SPI, use Legacy SPI opcode there as well.
+		 */
+		spi_nor_set_pp_settings(&params->page_programs[SNOR_CMD_PP_8_8_8_DTR],
+					SPINOR_OP_PP_4B, SNOR_PROTO_8_8_8_DTR);
+	}
 
 	/* Select the procedure to set the Quad Enable bit. */
 	if (params->hwcaps.mask & (SNOR_HWCAPS_READ_QUAD |
@@ -2520,6 +2677,11 @@ static int spi_nor_init_params(struct spi_nor *nor,
 		if (info->quad_enable)
 			params->quad_enable = info->quad_enable;
 	}
+
+	/* Select the procedure to set the OCTO Enable bit. */
+	if (params->hwcaps.mask & (SNOR_HWCAPS_PP_8_8_8 ||
+				   SNOR_HWCAPS_READ_8_8_8))
+		params->octal_dtr_enable = macronix_octal_dtr_enable;
 
 	/* Override the parameters with data read from SFDP tables. */
 	nor->addr_width = 0;
@@ -2569,6 +2731,7 @@ static int spi_nor_hwcaps_read2cmd(u32 hwcaps)
 		{ SNOR_HWCAPS_READ_1_8_8,	SNOR_CMD_READ_1_8_8 },
 		{ SNOR_HWCAPS_READ_8_8_8,	SNOR_CMD_READ_8_8_8 },
 		{ SNOR_HWCAPS_READ_1_8_8_DTR,	SNOR_CMD_READ_1_8_8_DTR },
+		{ SNOR_HWCAPS_READ_8_8_8_DTR,	SNOR_CMD_READ_8_8_8_DTR },
 	};
 
 	return spi_nor_hwcaps2cmd(hwcaps, hwcaps_read2cmd,
@@ -2585,6 +2748,7 @@ static int spi_nor_hwcaps_pp2cmd(u32 hwcaps)
 		{ SNOR_HWCAPS_PP_1_1_8,		SNOR_CMD_PP_1_1_8 },
 		{ SNOR_HWCAPS_PP_1_8_8,		SNOR_CMD_PP_1_8_8 },
 		{ SNOR_HWCAPS_PP_8_8_8,		SNOR_CMD_PP_8_8_8 },
+		{ SNOR_HWCAPS_PP_8_8_8_DTR,	SNOR_CMD_PP_8_8_8_DTR },
 	};
 
 	return spi_nor_hwcaps2cmd(hwcaps, hwcaps_pp2cmd,
@@ -2675,6 +2839,7 @@ static int spi_nor_setup(struct spi_nor *nor, const struct flash_info *info,
 {
 	u32 ignored_mask, shared_mask;
 	bool enable_quad_io;
+	bool enable_octo_io;
 	int err;
 
 	/*
@@ -2686,9 +2851,7 @@ static int spi_nor_setup(struct spi_nor *nor, const struct flash_info *info,
 	/* SPI n-n-n protocols are not supported yet. */
 	ignored_mask = (SNOR_HWCAPS_READ_2_2_2 |
 			SNOR_HWCAPS_READ_4_4_4 |
-			SNOR_HWCAPS_READ_8_8_8 |
-			SNOR_HWCAPS_PP_4_4_4 |
-			SNOR_HWCAPS_PP_8_8_8);
+			SNOR_HWCAPS_PP_4_4_4);
 	if (shared_mask & ignored_mask) {
 		dev_dbg(nor->dev,
 			"SPI n-n-n protocols are not supported yet.\n");
@@ -2727,6 +2890,14 @@ static int spi_nor_setup(struct spi_nor *nor, const struct flash_info *info,
 	else
 		nor->quad_enable = NULL;
 
+	/* Enable OCTO I/O if needed. */
+	enable_octo_io = (spi_nor_get_protocol_width(nor->read_proto) == 8 ||
+			  spi_nor_get_protocol_width(nor->write_proto) == 8);
+	if (enable_octo_io && params->octal_dtr_enable)
+		nor->octal_dtr_enable = params->octal_dtr_enable;
+	else
+		nor->octal_dtr_enable = NULL;
+
 	return 0;
 }
 
@@ -2751,6 +2922,14 @@ static int spi_nor_init(struct spi_nor *nor)
 		err = nor->quad_enable(nor);
 		if (err) {
 			dev_err(nor->dev, "quad mode not supported\n");
+			return err;
+		}
+	}
+
+	if (nor->octal_dtr_enable) {
+		err = nor->octal_dtr_enable(nor, true);
+		if (err) {
+			dev_err(nor->dev, "Octal DTR mode not supported\n");
 			return err;
 		}
 	}

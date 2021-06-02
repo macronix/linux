@@ -33,6 +33,51 @@ struct m25p {
 	struct spi_nor		spi_nor;
 };
 
+/**
+ * spi_nor_spimem_setup_op() - Set up common properties of a spi-mem op.
+ * @nor:		pointer to a 'struct spi_nor'
+ * @op:			pointer to the 'struct spi_mem_op' whose properties
+ *			need to be initialized.
+ * @proto:		the protocol from which the properties need to be set.
+ */
+void spi_nor_spimem_setup_op(const struct spi_nor *nor,
+			     struct spi_mem_op *op,
+			     const enum spi_nor_protocol proto)
+{
+	u8 ext;
+
+	op->cmd.buswidth = spi_nor_get_protocol_inst_nbits(proto);
+
+	if (op->addr.nbytes)
+		op->addr.buswidth = spi_nor_get_protocol_addr_nbits(proto);
+
+	if (op->dummy.nbytes)
+		op->dummy.buswidth = spi_nor_get_protocol_addr_nbits(proto);
+
+	if (op->data.nbytes)
+		op->data.buswidth = spi_nor_get_protocol_data_nbits(proto);
+
+	if (spi_nor_protocol_is_dtr(proto)) {
+		/*
+		 * SPIMEM supports mixed DTR modes, but right now we can only
+		 * have all phases either DTR or STR. IOW, SPIMEM can have
+		 * something like 4S-4D-4D, but SPI NOR can't. So, set all 4
+		 * phases to either DTR or STR.
+		 */
+		op->cmd.dtr = true;
+		op->addr.dtr = true;
+		op->dummy.dtr = true;
+		op->data.dtr = true;
+
+		/* 2 bytes per clock cycle in DTR mode. */
+		op->dummy.nbytes *= 2;
+
+		ext = ~op->cmd.opcode;
+		op->cmd.opcode = (op->cmd.opcode << 8) | ext;
+		op->cmd.nbytes = 2;
+	}
+}
+
 static int m25p80_read_reg(struct spi_nor *nor, u8 code, u8 *val, int len)
 {
 	struct m25p *flash = nor->priv;
@@ -43,7 +88,16 @@ static int m25p80_read_reg(struct spi_nor *nor, u8 code, u8 *val, int len)
 	void *scratchbuf;
 	int ret;
 
-	scratchbuf = kmalloc(len, GFP_KERNEL);
+	if (nor->reg_proto == SNOR_PROTO_8_8_8_DTR) {
+		op.addr.nbytes = nor->reg_addr_width;
+		op.addr.val = nor->reg_addr;
+		op.dummy.nbytes = nor->reg_dummy;
+		op.data.nbytes = ((len % 2) == 0) ? len : len + 1;
+	}
+
+	spi_nor_spimem_setup_op(nor, &op, nor->reg_proto);
+
+	scratchbuf = kmalloc(op.data.nbytes, GFP_KERNEL);
 	if (!scratchbuf)
 		return -ENOMEM;
 
@@ -70,6 +124,8 @@ static int m25p80_write_reg(struct spi_nor *nor, u8 opcode, u8 *buf, int len)
 	void *scratchbuf;
 	int ret;
 
+	spi_nor_spimem_setup_op(nor, &op, nor->reg_proto);
+
 	scratchbuf = kmemdup(buf, len, GFP_KERNEL);
 	if (!scratchbuf)
 		return -ENOMEM;
@@ -79,6 +135,25 @@ static int m25p80_write_reg(struct spi_nor *nor, u8 opcode, u8 *buf, int len)
 	kfree(scratchbuf);
 
 	return ret;
+}
+
+static ssize_t m25p80_erase(struct spi_nor *nor, loff_t offs)
+{
+	struct m25p *flash = nor->priv;
+	struct spi_mem_op op =
+			SPI_MEM_OP(SPI_MEM_OP_CMD(nor->erase_opcode, 1),
+				   SPI_MEM_OP_ADDR(nor->addr_width, offs, 1),
+				   SPI_MEM_OP_NO_DUMMY,
+				   SPI_MEM_OP_NO_DATA);
+	int ret;
+
+	spi_nor_spimem_setup_op(nor, &op, nor->reg_proto);
+
+	ret = spi_mem_exec_op(flash->spimem, &op);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 static ssize_t m25p80_write(struct spi_nor *nor, loff_t to, size_t len,
@@ -97,6 +172,7 @@ static ssize_t m25p80_write(struct spi_nor *nor, loff_t to, size_t len,
 	op.cmd.buswidth = spi_nor_get_protocol_inst_nbits(nor->write_proto);
 	op.addr.buswidth = spi_nor_get_protocol_addr_nbits(nor->write_proto);
 	op.data.buswidth = spi_nor_get_protocol_data_nbits(nor->write_proto);
+	spi_nor_spimem_setup_op(nor, &op, nor->reg_proto);
 
 	if (nor->program_opcode == SPINOR_OP_AAI_WP && nor->sst_write_second)
 		op.addr.nbytes = 0;
@@ -143,6 +219,8 @@ static ssize_t m25p80_read(struct spi_nor *nor, loff_t from, size_t len,
 
 	/* convert the dummy cycles to the number of bytes */
 	op.dummy.nbytes = (nor->read_dummy * op.dummy.buswidth) / 8;
+
+	spi_nor_spimem_setup_op(nor, &op, nor->reg_proto);
 
 	while (remaining) {
 		op.data.nbytes = remaining < UINT_MAX ? remaining : UINT_MAX;
@@ -192,6 +270,7 @@ static int m25p_probe(struct spi_mem *spimem)
 	/* install the hooks */
 	nor->read = m25p80_read;
 	nor->write = m25p80_write;
+	nor->erase = m25p80_erase;
 	nor->write_reg = m25p80_write_reg;
 	nor->read_reg = m25p80_read_reg;
 
@@ -202,7 +281,13 @@ static int m25p_probe(struct spi_mem *spimem)
 	spi_mem_set_drvdata(spimem, flash);
 	flash->spimem = spimem;
 
-	if (spi->mode & SPI_RX_QUAD) {
+	if (spi->mode & SPI_RX_OCTAL) {
+		hwcaps.mask |= SNOR_HWCAPS_READ_8_8_8_DTR;
+
+		if (spi->mode & SPI_TX_OCTAL)
+			hwcaps.mask |= SNOR_HWCAPS_PP_8_8_8_DTR;
+
+	} else if (spi->mode & SPI_RX_QUAD) {
 		hwcaps.mask |= SNOR_HWCAPS_READ_1_1_4;
 
 		if (spi->mode & SPI_TX_QUAD)
