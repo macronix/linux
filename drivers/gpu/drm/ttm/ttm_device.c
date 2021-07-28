@@ -36,11 +36,11 @@
 
 #include "ttm_module.h"
 
-/**
+/*
  * ttm_global_mutex - protecting the global state
  */
-DEFINE_MUTEX(ttm_global_mutex);
-unsigned ttm_glob_use_count;
+static DEFINE_MUTEX(ttm_global_mutex);
+static unsigned ttm_glob_use_count;
 struct ttm_global ttm_glob;
 EXPORT_SYMBOL(ttm_glob);
 
@@ -100,11 +100,13 @@ static int ttm_global_init(void)
 	debugfs_create_atomic_t("buffer_objects", 0444, ttm_debugfs_root,
 				&glob->bo_count);
 out:
+	if (ret)
+		--ttm_glob_use_count;
 	mutex_unlock(&ttm_global_mutex);
 	return ret;
 }
 
-/**
+/*
  * A buffer object shrink method that tries to swap out the first
  * buffer object on the global::swap_lru list.
  */
@@ -143,14 +145,8 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 
 		for (j = 0; j < TTM_MAX_BO_PRIORITY; ++j) {
 			list_for_each_entry(bo, &man->lru[j], lru) {
-				uint32_t num_pages;
+				uint32_t num_pages = PFN_UP(bo->base.size);
 
-				if (!bo->ttm || !ttm_tt_is_populated(bo->ttm) ||
-				    bo->ttm->page_flags & TTM_PAGE_FLAG_SG ||
-				    bo->ttm->page_flags & TTM_PAGE_FLAG_SWAPPED)
-					continue;
-
-				num_pages = bo->ttm->num_pages;
 				ret = ttm_bo_swapout(bo, ctx, gfp_flags);
 				/* ttm_bo_swapout has dropped the lru_lock */
 				if (!ret)
@@ -164,21 +160,6 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 	return 0;
 }
 EXPORT_SYMBOL(ttm_device_swapout);
-
-static void ttm_init_sysman(struct ttm_device *bdev)
-{
-	struct ttm_resource_manager *man = &bdev->sysman;
-
-	/*
-	 * Initialize the system memory buffer type.
-	 * Other types need to be driver / IOCTL initialized.
-	 */
-	man->use_tt = true;
-
-	ttm_resource_manager_init(man, 0);
-	ttm_set_driver_manager(bdev, TTM_PL_SYSTEM, man);
-	ttm_resource_manager_set_used(man, true);
-}
 
 static void ttm_device_delayed_workqueue(struct work_struct *work)
 {
@@ -222,7 +203,7 @@ int ttm_device_init(struct ttm_device *bdev, struct ttm_device_funcs *funcs,
 
 	bdev->funcs = funcs;
 
-	ttm_init_sysman(bdev);
+	ttm_sys_man_init(bdev);
 	ttm_pool_init(&bdev->pool, dev, use_dma_alloc, use_dma32);
 
 	bdev->vma_manager = vma_manager;
