@@ -79,7 +79,7 @@ static void __init imx6q_enet_phy_init(void)
 static void __init imx6q_1588_init(void)
 {
 	struct device_node *np;
-	struct clk *ptp_clk;
+	struct clk *ptp_clk, *fec_enet_ref;
 	struct clk *enet_ref;
 	struct regmap *gpr;
 	u32 clksel;
@@ -89,6 +89,14 @@ static void __init imx6q_1588_init(void)
 		pr_warn("%s: failed to find fec node\n", __func__);
 		return;
 	}
+
+	/*
+	 * If enet_clk_ref configured, we assume DT did it properly and .
+	 * clk-imx6q.c will do needed configuration.
+	 */
+	fec_enet_ref = of_clk_get_by_name(np, "enet_clk_ref");
+	if (!IS_ERR(fec_enet_ref))
+		goto put_node;
 
 	ptp_clk = of_clk_get(np, 2);
 	if (IS_ERR(ptp_clk)) {
@@ -172,6 +180,9 @@ static void __init imx6q_init_machine(void)
 				imx_get_soc_revision());
 
 	imx6q_enet_phy_init();
+
+	of_platform_default_populate(NULL, NULL, NULL);
+
 	imx_anatop_init();
 	cpu_is_imx6q() ?  imx6q_pm_init() : imx6dl_pm_init();
 	imx6q_1588_init();

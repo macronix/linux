@@ -71,14 +71,14 @@ static const struct device_type greybus_gbphy_dev_type = {
 	.pm	=	&gb_gbphy_pm_ops,
 };
 
-static int gbphy_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int gbphy_dev_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct gbphy_device *gbphy_dev = to_gbphy_dev(dev);
-	struct greybus_descriptor_cport *cport_desc = gbphy_dev->cport_desc;
-	struct gb_bundle *bundle = gbphy_dev->bundle;
-	struct gb_interface *intf = bundle->intf;
-	struct gb_module *module = intf->module;
-	struct gb_host_device *hd = intf->hd;
+	const struct gbphy_device *gbphy_dev = to_gbphy_dev(dev);
+	const struct greybus_descriptor_cport *cport_desc = gbphy_dev->cport_desc;
+	const struct gb_bundle *bundle = gbphy_dev->bundle;
+	const struct gb_interface *intf = bundle->intf;
+	const struct gb_module *module = intf->module;
+	const struct gb_host_device *hd = intf->hd;
 
 	if (add_uevent_var(env, "BUS=%u", hd->bus_id))
 		return -ENOMEM;
@@ -169,7 +169,7 @@ static int gbphy_dev_probe(struct device *dev)
 	return ret;
 }
 
-static int gbphy_dev_remove(struct device *dev)
+static void gbphy_dev_remove(struct device *dev)
 {
 	struct gbphy_driver *gbphy_drv = to_gbphy_driver(dev->driver);
 	struct gbphy_device *gbphy_dev = to_gbphy_dev(dev);
@@ -180,8 +180,6 @@ static int gbphy_dev_remove(struct device *dev)
 	pm_runtime_set_suspended(dev);
 	pm_runtime_put_noidle(dev);
 	pm_runtime_dont_use_autosuspend(dev);
-
-	return 0;
 }
 
 static struct bus_type gbphy_bus_type = {

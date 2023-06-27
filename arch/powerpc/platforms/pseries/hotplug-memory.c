@@ -16,7 +16,6 @@
 
 #include <asm/firmware.h>
 #include <asm/machdep.h>
-#include <asm/prom.h>
 #include <asm/sparsemem.h>
 #include <asm/fadump.h>
 #include <asm/drmem.h>
@@ -180,6 +179,8 @@ static int update_lmb_associativity_index(struct drmem_lmb *lmb)
 		return -ENODEV;
 	}
 
+	update_numa_distance(lmb_node);
+
 	dr_node = of_find_node_by_path("/ibm,dynamic-reconfiguration-memory");
 	if (!dr_node) {
 		dlpar_free_cc_nodes(lmb_node);
@@ -211,13 +212,11 @@ static int update_lmb_associativity_index(struct drmem_lmb *lmb)
 static struct memory_block *lmb_to_memblock(struct drmem_lmb *lmb)
 {
 	unsigned long section_nr;
-	struct mem_section *mem_sect;
 	struct memory_block *mem_block;
 
 	section_nr = pfn_to_section_nr(PFN_DOWN(lmb->base_addr));
-	mem_sect = __nr_to_section(section_nr);
 
-	mem_block = find_memory_block(mem_sect);
+	mem_block = find_memory_block(section_nr);
 	return mem_block;
 }
 
@@ -286,7 +285,7 @@ static int pseries_remove_memblock(unsigned long base, unsigned long memblock_si
 {
 	unsigned long block_sz, start_pfn;
 	int sections_per_block;
-	int i, nid;
+	int i;
 
 	start_pfn = base >> PAGE_SHIFT;
 
@@ -297,10 +296,9 @@ static int pseries_remove_memblock(unsigned long base, unsigned long memblock_si
 
 	block_sz = pseries_memory_block_size();
 	sections_per_block = block_sz / MIN_MEMORY_BLOCK_SIZE;
-	nid = memory_add_physaddr_to_nid(base);
 
 	for (i = 0; i < sections_per_block; i++) {
-		__remove_memory(nid, base, MIN_MEMORY_BLOCK_SIZE);
+		__remove_memory(base, MIN_MEMORY_BLOCK_SIZE);
 		base += MIN_MEMORY_BLOCK_SIZE;
 	}
 
@@ -313,11 +311,8 @@ out:
 
 static int pseries_remove_mem_node(struct device_node *np)
 {
-	const __be32 *prop;
-	unsigned long base;
-	unsigned long lmb_size;
-	int ret = -EINVAL;
-	int addr_cells, size_cells;
+	int ret;
+	struct resource res;
 
 	/*
 	 * Check to see if we are actually removing memory
@@ -328,21 +323,11 @@ static int pseries_remove_mem_node(struct device_node *np)
 	/*
 	 * Find the base address and size of the memblock
 	 */
-	prop = of_get_property(np, "reg", NULL);
-	if (!prop)
+	ret = of_address_to_resource(np, 0, &res);
+	if (ret)
 		return ret;
 
-	addr_cells = of_n_addr_cells(np);
-	size_cells = of_n_size_cells(np);
-
-	/*
-	 * "reg" property represents (addr,size) tuple.
-	 */
-	base = of_read_number(prop, addr_cells);
-	prop += addr_cells;
-	lmb_size = of_read_number(prop, size_cells);
-
-	pseries_remove_memblock(base, lmb_size);
+	pseries_remove_memblock(res.start, resource_size(&res));
 	return 0;
 }
 
@@ -387,7 +372,7 @@ static int dlpar_remove_lmb(struct drmem_lmb *lmb)
 
 	block_sz = pseries_memory_block_size();
 
-	__remove_memory(mem_block->nid, lmb->base_addr, block_sz);
+	__remove_memory(lmb->base_addr, block_sz);
 	put_device(&mem_block->dev);
 
 	/* Update memory regions for memory remove */
@@ -660,7 +645,7 @@ static int dlpar_add_lmb(struct drmem_lmb *lmb)
 
 	rc = dlpar_online_lmb(lmb);
 	if (rc) {
-		__remove_memory(nid, lmb->base_addr, block_sz);
+		__remove_memory(lmb->base_addr, block_sz);
 		invalidate_lmb_associativity_index(lmb);
 	} else {
 		lmb->flags |= DRCONF_MEM_ASSIGNED;
@@ -931,11 +916,8 @@ int dlpar_memory(struct pseries_hp_errorlog *hp_elog)
 
 static int pseries_add_mem_node(struct device_node *np)
 {
-	const __be32 *prop;
-	unsigned long base;
-	unsigned long lmb_size;
-	int ret = -EINVAL;
-	int addr_cells, size_cells;
+	int ret;
+	struct resource res;
 
 	/*
 	 * Check to see if we are actually adding memory
@@ -946,23 +928,14 @@ static int pseries_add_mem_node(struct device_node *np)
 	/*
 	 * Find the base and size of the memblock
 	 */
-	prop = of_get_property(np, "reg", NULL);
-	if (!prop)
+	ret = of_address_to_resource(np, 0, &res);
+	if (ret)
 		return ret;
-
-	addr_cells = of_n_addr_cells(np);
-	size_cells = of_n_size_cells(np);
-	/*
-	 * "reg" property represents (addr,size) tuple.
-	 */
-	base = of_read_number(prop, addr_cells);
-	prop += addr_cells;
-	lmb_size = of_read_number(prop, size_cells);
 
 	/*
 	 * Update memory region to represent the memory add
 	 */
-	ret = memblock_add(base, lmb_size);
+	ret = memblock_add(res.start, resource_size(&res));
 	return (ret < 0) ? -EINVAL : 0;
 }
 
@@ -979,6 +952,10 @@ static int pseries_memory_notifier(struct notifier_block *nb,
 	case OF_RECONFIG_DETACH_NODE:
 		err = pseries_remove_mem_node(rd->dn);
 		break;
+	case OF_RECONFIG_UPDATE_PROPERTY:
+		if (!strcmp(rd->dn->name,
+			    "ibm,dynamic-reconfiguration-memory"))
+			drmem_update_lmbs(rd->prop);
 	}
 	return notifier_from_errno(err);
 }

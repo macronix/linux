@@ -26,6 +26,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/bits.h>
+#include "../pci.h"
 
 /* Register offsets */
 #define IXP4XX_PCI_NP_AD		0x00
@@ -145,7 +146,7 @@ static int ixp4xx_pci_check_master_abort(struct ixp4xx_pci *p)
 	return 0;
 }
 
-static int ixp4xx_pci_read(struct ixp4xx_pci *p, u32 addr, u32 cmd, u32 *data)
+static int ixp4xx_pci_read_indirect(struct ixp4xx_pci *p, u32 addr, u32 cmd, u32 *data)
 {
 	ixp4xx_writel(p, IXP4XX_PCI_NP_AD, addr);
 
@@ -170,7 +171,7 @@ static int ixp4xx_pci_read(struct ixp4xx_pci *p, u32 addr, u32 cmd, u32 *data)
 	return ixp4xx_pci_check_master_abort(p);
 }
 
-static int ixp4xx_pci_write(struct ixp4xx_pci *p, u32 addr, u32 cmd, u32 data)
+static int ixp4xx_pci_write_indirect(struct ixp4xx_pci *p, u32 addr, u32 cmd, u32 data)
 {
 	ixp4xx_writel(p, IXP4XX_PCI_NP_AD, addr);
 
@@ -188,12 +189,13 @@ static u32 ixp4xx_config_addr(u8 bus_num, u16 devfn, int where)
 	/* Root bus is always 0 in this hardware */
 	if (bus_num == 0) {
 		/* type 0 */
-		return BIT(32-PCI_SLOT(devfn)) | ((PCI_FUNC(devfn)) << 8) |
-			(where & ~3);
+		return (PCI_CONF1_ADDRESS(0, 0, PCI_FUNC(devfn), where) &
+			~PCI_CONF1_ENABLE) | BIT(32-PCI_SLOT(devfn));
 	} else {
 		/* type 1 */
-		return (bus_num << 16) | ((PCI_SLOT(devfn)) << 11) |
-			((PCI_FUNC(devfn)) << 8) | (where & ~3) | 1;
+		return (PCI_CONF1_ADDRESS(bus_num, PCI_SLOT(devfn),
+					  PCI_FUNC(devfn), where) &
+			~PCI_CONF1_ENABLE) | 1;
 	}
 }
 
@@ -308,7 +310,7 @@ static int ixp4xx_pci_read_config(struct pci_bus *bus, unsigned int devfn,
 	dev_dbg(p->dev, "read_config from %d size %d dev %d:%d:%d address: %08x cmd: %08x\n",
 		where, size, bus_num, PCI_SLOT(devfn), PCI_FUNC(devfn), addr, cmd);
 
-	ret = ixp4xx_pci_read(p, addr, cmd, &val);
+	ret = ixp4xx_pci_read_indirect(p, addr, cmd, &val);
 	if (ret)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
@@ -356,7 +358,7 @@ static int ixp4xx_pci_write_config(struct pci_bus *bus,  unsigned int devfn,
 	dev_dbg(p->dev, "write_config_byte %#x to %d size %d dev %d:%d:%d addr: %08x cmd %08x\n",
 		value, where, size, bus_num, PCI_SLOT(devfn), PCI_FUNC(devfn), addr, cmd);
 
-	ret = ixp4xx_pci_write(p, addr, cmd, val);
+	ret = ixp4xx_pci_write_indirect(p, addr, cmd, val);
 	if (ret)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 

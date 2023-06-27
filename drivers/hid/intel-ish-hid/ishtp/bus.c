@@ -241,8 +241,8 @@ static int ishtp_cl_bus_match(struct device *dev, struct device_driver *drv)
 	struct ishtp_cl_device *device = to_ishtp_cl_device(dev);
 	struct ishtp_cl_driver *driver = to_ishtp_cl_driver(drv);
 
-	return guid_equal(driver->guid,
-			  &device->fw_client->props.protocol_name);
+	return(device->fw_client ? guid_equal(&driver->id[0].guid,
+	       &device->fw_client->props.protocol_name) : 0);
 }
 
 /**
@@ -255,7 +255,7 @@ static int ishtp_cl_bus_match(struct device *dev, struct device_driver *drv)
  *
  * Return: Return value from driver remove() call.
  */
-static int ishtp_cl_device_remove(struct device *dev)
+static void ishtp_cl_device_remove(struct device *dev)
 {
 	struct ishtp_cl_device *device = to_ishtp_cl_device(dev);
 	struct ishtp_cl_driver *driver = to_ishtp_cl_driver(dev->driver);
@@ -267,8 +267,6 @@ static int ishtp_cl_device_remove(struct device *dev)
 
 	if (driver->remove)
 		driver->remove(device);
-
-	return 0;
 }
 
 /**
@@ -314,13 +312,6 @@ static int ishtp_cl_device_resume(struct device *dev)
 	if (!device)
 		return 0;
 
-	/*
-	 * When ISH needs hard reset, it is done asynchrnously, hence bus
-	 * resume will  be called before full ISH resume
-	 */
-	if (device->ishtp_dev->resume_flag)
-		return 0;
-
 	driver = to_ishtp_cl_driver(dev->driver);
 	if (driver && driver->driver.pm) {
 		if (driver->driver.pm->resume)
@@ -359,7 +350,7 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *a,
 {
 	int len;
 
-	len = snprintf(buf, PAGE_SIZE, "ishtp:%s\n", dev_name(dev));
+	len = snprintf(buf, PAGE_SIZE, ISHTP_MODULE_PREFIX "%s\n", dev_name(dev));
 	return (len >= PAGE_SIZE) ? (PAGE_SIZE - 1) : len;
 }
 static DEVICE_ATTR_RO(modalias);
@@ -370,9 +361,9 @@ static struct attribute *ishtp_cl_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(ishtp_cl_dev);
 
-static int ishtp_cl_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int ishtp_cl_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	if (add_uevent_var(env, "MODALIAS=ishtp:%s", dev_name(dev)))
+	if (add_uevent_var(env, "MODALIAS=" ISHTP_MODULE_PREFIX "%s", dev_name(dev)))
 		return -ENOMEM;
 	return 0;
 }
@@ -848,6 +839,28 @@ struct device *ishtp_device(struct ishtp_cl_device *device)
 	return &device->dev;
 }
 EXPORT_SYMBOL(ishtp_device);
+
+/**
+ * ishtp_wait_resume() - Wait for IPC resume
+ *
+ * Wait for IPC resume
+ *
+ * Return: resume complete or not
+ */
+bool ishtp_wait_resume(struct ishtp_device *dev)
+{
+	/* 50ms to get resume response */
+	#define WAIT_FOR_RESUME_ACK_MS		50
+
+	/* Waiting to get resume response */
+	if (dev->resume_flag)
+		wait_event_interruptible_timeout(dev->resume_wait,
+						 !dev->resume_flag,
+						 msecs_to_jiffies(WAIT_FOR_RESUME_ACK_MS));
+
+	return (!dev->resume_flag);
+}
+EXPORT_SYMBOL_GPL(ishtp_wait_resume);
 
 /**
  * ishtp_get_pci_device() - Return PCI device dev pointer

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2019 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2019, 2021 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -416,7 +416,7 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 	struct iwl_rx_packet *pkt;
 	struct iwl_host_cmd cmd = {
 		.id = MCC_UPDATE_CMD,
-		.flags = CMD_WANT_SKB,
+		.flags = CMD_WANT_SKB | CMD_SEND_IN_RFKILL,
 		.data = { &mcc_update_cmd },
 	};
 
@@ -445,6 +445,11 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		struct iwl_mcc_update_resp *mcc_resp = (void *)pkt->data;
 
 		n_channels =  __le32_to_cpu(mcc_resp->n_channels);
+		if (iwl_rx_packet_payload_len(pkt) !=
+		    struct_size(mcc_resp, channels, n_channels)) {
+			resp_cp = ERR_PTR(-EINVAL);
+			goto exit;
+		}
 		resp_len = sizeof(struct iwl_mcc_update_resp) +
 			   n_channels * sizeof(__le32);
 		resp_cp = kmemdup(mcc_resp, resp_len, GFP_KERNEL);
@@ -456,6 +461,11 @@ iwl_mvm_update_mcc(struct iwl_mvm *mvm, const char *alpha2,
 		struct iwl_mcc_update_resp_v3 *mcc_resp_v3 = (void *)pkt->data;
 
 		n_channels =  __le32_to_cpu(mcc_resp_v3->n_channels);
+		if (iwl_rx_packet_payload_len(pkt) !=
+		    struct_size(mcc_resp_v3, channels, n_channels)) {
+			resp_cp = ERR_PTR(-EINVAL);
+			goto exit;
+		}
 		resp_len = sizeof(struct iwl_mcc_update_resp) +
 			   n_channels * sizeof(__le32);
 		resp_cp = kzalloc(resp_len, GFP_KERNEL);
@@ -583,8 +593,9 @@ void iwl_mvm_rx_chub_update_mcc(struct iwl_mvm *mvm,
 		return;
 
 	wgds_tbl_idx = iwl_mvm_get_sar_geo_profile(mvm);
-	if (wgds_tbl_idx < 0)
-		IWL_DEBUG_INFO(mvm, "SAR WGDS is disabled (%d)\n",
+	if (wgds_tbl_idx < 1)
+		IWL_DEBUG_INFO(mvm,
+			       "SAR WGDS is disabled or error received (%d)\n",
 			       wgds_tbl_idx);
 	else
 		IWL_DEBUG_INFO(mvm, "SAR WGDS: geo profile %d is configured\n",

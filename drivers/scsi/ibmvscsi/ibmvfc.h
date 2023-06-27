@@ -745,6 +745,7 @@ struct ibmvfc_event {
 	struct ibmvfc_target *tgt;
 	struct scsi_cmnd *cmnd;
 	atomic_t free;
+	atomic_t active;
 	union ibmvfc_iu *xfer_iu;
 	void (*done)(struct ibmvfc_event *evt);
 	void (*_done)(struct ibmvfc_event *evt);
@@ -788,6 +789,7 @@ struct ibmvfc_queue {
 	spinlock_t _lock;
 	spinlock_t *q_lock;
 
+	struct ibmvfc_host *vhost;
 	struct ibmvfc_event_pool evt_pool;
 	struct list_head sent;
 	struct list_head free;
@@ -796,7 +798,6 @@ struct ibmvfc_queue {
 	union ibmvfc_iu cancel_rsp;
 
 	/* Sub-CRQ fields */
-	struct ibmvfc_host *vhost;
 	unsigned long cookie;
 	unsigned long vios_cookie;
 	unsigned long hw_irq;
@@ -875,6 +876,7 @@ struct ibmvfc_host {
 	int reinit;
 	int delay_init;
 	int scan_complete;
+	int scan_timeout;
 	int logged_in;
 	int mq_enabled;
 	int using_channels;

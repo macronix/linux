@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2014 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2014 Broadcom Corporation
 
 /*
  * iProc SDHCI platform driver
@@ -28,6 +18,7 @@ struct sdhci_iproc_data {
 	u32 caps;
 	u32 caps1;
 	u32 mmc_caps;
+	bool missing_caps;
 };
 
 struct sdhci_iproc_host {
@@ -173,6 +164,23 @@ static unsigned int sdhci_iproc_get_max_clock(struct sdhci_host *host)
 		return pltfm_host->clock;
 }
 
+/*
+ * There is a known bug on BCM2711's SDHCI core integration where the
+ * controller will hang when the difference between the core clock and the bus
+ * clock is too great. Specifically this can be reproduced under the following
+ * conditions:
+ *
+ *  - No SD card plugged in, polling thread is running, probing cards at
+ *    100 kHz.
+ *  - BCM2711's core clock configured at 500MHz or more
+ *
+ * So we set 200kHz as the minimum clock frequency available for that SoC.
+ */
+static unsigned int sdhci_iproc_bcm2711_get_min_clock(struct sdhci_host *host)
+{
+	return 200000;
+}
+
 static const struct sdhci_ops sdhci_iproc_ops = {
 	.set_clock = sdhci_set_clock,
 	.get_max_clock = sdhci_iproc_get_max_clock,
@@ -244,7 +252,6 @@ static const struct sdhci_iproc_data iproc_data = {
 static const struct sdhci_pltfm_data sdhci_bcm2835_pltfm_data = {
 	.quirks = SDHCI_QUIRK_BROKEN_CARD_DETECTION |
 		  SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK |
-		  SDHCI_QUIRK_MISSING_CAPS |
 		  SDHCI_QUIRK_NO_HISPD_BIT,
 	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
 	.ops = &sdhci_iproc_32only_ops,
@@ -259,6 +266,7 @@ static const struct sdhci_iproc_data bcm2835_data = {
 	.caps1 = SDHCI_DRIVER_TYPE_A |
 		 SDHCI_DRIVER_TYPE_C,
 	.mmc_caps = 0x00000000,
+	.missing_caps = true,
 };
 
 static const struct sdhci_ops sdhci_iproc_bcm2711_ops = {
@@ -271,6 +279,7 @@ static const struct sdhci_ops sdhci_iproc_bcm2711_ops = {
 	.set_clock = sdhci_set_clock,
 	.set_power = sdhci_set_power_and_bus_voltage,
 	.get_max_clock = sdhci_iproc_get_max_clock,
+	.get_min_clock = sdhci_iproc_bcm2711_get_min_clock,
 	.set_bus_width = sdhci_set_bus_width,
 	.reset = sdhci_reset,
 	.set_uhs_signaling = sdhci_set_uhs_signaling,
@@ -287,8 +296,7 @@ static const struct sdhci_iproc_data bcm2711_data = {
 };
 
 static const struct sdhci_pltfm_data sdhci_bcm7211a0_pltfm_data = {
-	.quirks = SDHCI_QUIRK_MISSING_CAPS |
-		SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
+	.quirks = SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
 		SDHCI_QUIRK_BROKEN_DMA |
 		SDHCI_QUIRK_BROKEN_ADMA,
 	.ops = &sdhci_iproc_ops,
@@ -307,6 +315,7 @@ static const struct sdhci_iproc_data bcm7211a0_data = {
 		SDHCI_CAN_DO_HISPD,
 	.caps1 = SDHCI_DRIVER_TYPE_C |
 		 SDHCI_DRIVER_TYPE_D,
+	.missing_caps = true,
 };
 
 static const struct of_device_id sdhci_iproc_of_match[] = {
@@ -389,9 +398,10 @@ static int sdhci_iproc_probe(struct platform_device *pdev)
 		}
 	}
 
-	if (iproc_host->data->pdata->quirks & SDHCI_QUIRK_MISSING_CAPS) {
-		host->caps = iproc_host->data->caps;
-		host->caps1 = iproc_host->data->caps1;
+	if (iproc_host->data->missing_caps) {
+		__sdhci_read_caps(host, NULL,
+				  &iproc_host->data->caps,
+				  &iproc_host->data->caps1);
 	}
 
 	ret = sdhci_add_host(host);

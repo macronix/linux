@@ -10,16 +10,20 @@ ARM64 Architecture
     acpi_object_usage
     amu
     arm-acpi
+    asymmetric-32bit
     booting
     cpu-feature-registers
     elf_hwcaps
     hugetlbpage
+    kdump
     legacy_instructions
     memory
     memory-tagging-extension
     perf
     pointer-authentication
+    ptdump
     silicon-errata
+    sme
     sve
     tagged-address-abi
     tagged-pointers

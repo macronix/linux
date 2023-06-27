@@ -49,6 +49,8 @@ struct aic32x4_priv {
 	struct aic32x4_setup_data *setup;
 	struct device *dev;
 	enum aic32x4_type type;
+
+	unsigned int fmt;
 };
 
 static int aic32x4_reset_adc(struct snd_soc_dapm_widget *w,
@@ -611,19 +613,19 @@ static int aic32x4_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 static int aic32x4_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 {
 	struct snd_soc_component *component = codec_dai->component;
+	struct aic32x4_priv *aic32x4 = snd_soc_component_get_drvdata(component);
 	u8 iface_reg_1 = 0;
 	u8 iface_reg_2 = 0;
 	u8 iface_reg_3 = 0;
 
-	/* set master/slave audio interface */
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBP_CFP:
 		iface_reg_1 |= AIC32X4_BCLKMASTER | AIC32X4_WCLKMASTER;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
-		printk(KERN_ERR "aic32x4: invalid DAI master/slave interface\n");
+		printk(KERN_ERR "aic32x4: invalid clock provider\n");
 		return -EINVAL;
 	}
 
@@ -654,6 +656,8 @@ static int aic32x4_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 		return -EINVAL;
 	}
 
+	aic32x4->fmt = fmt;
+
 	snd_soc_component_update_bits(component, AIC32X4_IFACE1,
 				AIC32X4_IFACE1_DATATYPE_MASK |
 				AIC32X4_IFACE1_MASTER_MASK, iface_reg_1);
@@ -682,11 +686,20 @@ static int aic32x4_set_dosr(struct snd_soc_component *component, u16 dosr)
 static int aic32x4_set_processing_blocks(struct snd_soc_component *component,
 						u8 r_block, u8 p_block)
 {
-	if (r_block > 18 || p_block > 25)
-		return -EINVAL;
+	struct aic32x4_priv *aic32x4 = snd_soc_component_get_drvdata(component);
 
-	snd_soc_component_write(component, AIC32X4_ADCSPB, r_block);
-	snd_soc_component_write(component, AIC32X4_DACSPB, p_block);
+	if (aic32x4->type == AIC32X4_TYPE_TAS2505) {
+		if (r_block || p_block > 3)
+			return -EINVAL;
+
+		snd_soc_component_write(component, AIC32X4_DACSPB, p_block);
+	} else { /* AIC32x4 */
+		if (r_block > 18 || p_block > 25)
+			return -EINVAL;
+
+		snd_soc_component_write(component, AIC32X4_ADCSPB, r_block);
+		snd_soc_component_write(component, AIC32X4_DACSPB, p_block);
+	}
 
 	return 0;
 }
@@ -695,6 +708,7 @@ static int aic32x4_setup_clocks(struct snd_soc_component *component,
 				unsigned int sample_rate, unsigned int channels,
 				unsigned int bit_depth)
 {
+	struct aic32x4_priv *aic32x4 = snd_soc_component_get_drvdata(component);
 	u8 aosr;
 	u16 dosr;
 	u8 adc_resource_class, dac_resource_class;
@@ -704,7 +718,7 @@ static int aic32x4_setup_clocks(struct snd_soc_component *component,
 	unsigned long adc_clock_rate, dac_clock_rate;
 	int ret;
 
-	struct clk_bulk_data clocks[] = {
+	static struct clk_bulk_data clocks[] = {
 		{ .id = "pll" },
 		{ .id = "nadc" },
 		{ .id = "madc" },
@@ -721,23 +735,36 @@ static int aic32x4_setup_clocks(struct snd_soc_component *component,
 		adc_resource_class = 6;
 		dac_resource_class = 8;
 		dosr_increment = 8;
-		aic32x4_set_processing_blocks(component, 1, 1);
+		if (aic32x4->type == AIC32X4_TYPE_TAS2505)
+			aic32x4_set_processing_blocks(component, 0, 1);
+		else
+			aic32x4_set_processing_blocks(component, 1, 1);
 	} else if (sample_rate <= 96000) {
 		aosr = 64;
 		adc_resource_class = 6;
 		dac_resource_class = 8;
 		dosr_increment = 4;
-		aic32x4_set_processing_blocks(component, 1, 9);
+		if (aic32x4->type == AIC32X4_TYPE_TAS2505)
+			aic32x4_set_processing_blocks(component, 0, 1);
+		else
+			aic32x4_set_processing_blocks(component, 1, 9);
 	} else if (sample_rate == 192000) {
 		aosr = 32;
 		adc_resource_class = 3;
 		dac_resource_class = 4;
 		dosr_increment = 2;
-		aic32x4_set_processing_blocks(component, 13, 19);
+		if (aic32x4->type == AIC32X4_TYPE_TAS2505)
+			aic32x4_set_processing_blocks(component, 0, 1);
+		else
+			aic32x4_set_processing_blocks(component, 13, 19);
 	} else {
 		dev_err(component->dev, "Sampling rate not supported\n");
 		return -EINVAL;
 	}
+
+	/* PCM over I2S is always 2-channel */
+	if ((aic32x4->fmt & SND_SOC_DAIFMT_FORMAT_MASK) == SND_SOC_DAIFMT_I2S)
+		channels = 2;
 
 	madc = DIV_ROUND_UP((32 * adc_resource_class), aosr);
 	max_dosr = (AIC32X4_MAX_DOSR_FREQ / sample_rate / dosr_increment) *
@@ -859,7 +886,7 @@ static int aic32x4_set_bias_level(struct snd_soc_component *component,
 {
 	int ret;
 
-	struct clk_bulk_data clocks[] = {
+	static struct clk_bulk_data clocks[] = {
 		{ .id = "madc" },
 		{ .id = "mdac" },
 		{ .id = "bdiv" },
@@ -975,7 +1002,7 @@ static int aic32x4_component_probe(struct snd_soc_component *component)
 	u32 tmp_reg;
 	int ret;
 
-	struct clk_bulk_data clocks[] = {
+	static struct clk_bulk_data clocks[] = {
 		{ .id = "codec_clkin" },
 		{ .id = "pll" },
 		{ .id = "bdiv" },
@@ -1059,7 +1086,6 @@ static const struct snd_soc_component_driver soc_component_dev_aic32x4 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct snd_kcontrol_new aic32x4_tas2505_snd_controls[] = {
@@ -1112,7 +1138,7 @@ static struct snd_soc_dai_driver aic32x4_tas2505_dai = {
 	.playback = {
 			 .stream_name = "Playback",
 			 .channels_min = 1,
-			 .channels_max = 1,
+			 .channels_max = 2,
 			 .rates = SNDRV_PCM_RATE_8000_96000,
 			 .formats = AIC32X4_FORMATS,},
 	.ops = &aic32x4_ops,
@@ -1125,7 +1151,7 @@ static int aic32x4_tas2505_component_probe(struct snd_soc_component *component)
 	u32 tmp_reg;
 	int ret;
 
-	struct clk_bulk_data clocks[] = {
+	static struct clk_bulk_data clocks[] = {
 		{ .id = "codec_clkin" },
 		{ .id = "pll" },
 		{ .id = "bdiv" },
@@ -1181,7 +1207,6 @@ static const struct snd_soc_component_driver soc_component_dev_aic32x4_tas2505 =
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static int aic32x4_parse_dt(struct aic32x4_priv *aic32x4,
@@ -1399,13 +1424,11 @@ err_disable_regulators:
 }
 EXPORT_SYMBOL(aic32x4_probe);
 
-int aic32x4_remove(struct device *dev)
+void aic32x4_remove(struct device *dev)
 {
 	struct aic32x4_priv *aic32x4 = dev_get_drvdata(dev);
 
 	aic32x4_disable_regulators(aic32x4);
-
-	return 0;
 }
 EXPORT_SYMBOL(aic32x4_remove);
 

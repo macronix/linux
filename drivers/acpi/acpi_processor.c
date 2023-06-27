@@ -15,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/platform_device.h>
 
 #include <acpi/processor.h>
 
@@ -148,6 +149,34 @@ static int acpi_processor_errata(void)
 	return result;
 }
 
+/* Create a platform device to represent a CPU frequency control mechanism. */
+static void cpufreq_add_device(const char *name)
+{
+	struct platform_device *pdev;
+
+	pdev = platform_device_register_simple(name, PLATFORM_DEVID_NONE, NULL, 0);
+	if (IS_ERR(pdev))
+		pr_info("%s device creation failed: %ld\n", name, PTR_ERR(pdev));
+}
+
+#ifdef CONFIG_X86
+/* Check presence of Processor Clocking Control by searching for \_SB.PCCH. */
+static void __init acpi_pcc_cpufreq_init(void)
+{
+	acpi_status status;
+	acpi_handle handle;
+
+	status = acpi_get_handle(NULL, "\\_SB", &handle);
+	if (ACPI_FAILURE(status))
+		return;
+
+	if (acpi_has_method(handle, "PCCH"))
+		cpufreq_add_device("pcc-cpufreq");
+}
+#else
+static void __init acpi_pcc_cpufreq_init(void) {}
+#endif /* CONFIG_X86 */
+
 /* Initialization */
 #ifdef CONFIG_ACPI_HOTPLUG_CPU
 int __weak acpi_map_cpu(acpi_handle handle,
@@ -182,7 +211,7 @@ static int acpi_processor_hotadd_init(struct acpi_processor *pr)
 		return -ENODEV;
 
 	cpu_maps_update_begin();
-	cpu_hotplug_begin();
+	cpus_write_lock();
 
 	ret = acpi_map_cpu(pr->handle, pr->phys_id, pr->acpi_id, &pr->id);
 	if (ret)
@@ -203,7 +232,7 @@ static int acpi_processor_hotadd_init(struct acpi_processor *pr)
 	pr->flags.need_hotplug_init = 1;
 
 out:
-	cpu_hotplug_done();
+	cpus_write_unlock();
 	cpu_maps_update_done();
 	return ret;
 }
@@ -280,14 +309,22 @@ static int acpi_processor_get_info(struct acpi_device *device)
 		dev_dbg(&device->dev, "Failed to get CPU physical ID.\n");
 
 	pr->id = acpi_map_cpuid(pr->phys_id, pr->acpi_id);
-	if (!cpu0_initialized && !acpi_has_cpu_in_madt()) {
+	if (!cpu0_initialized) {
 		cpu0_initialized = 1;
 		/*
 		 * Handle UP system running SMP kernel, with no CPU
 		 * entry in MADT
 		 */
-		if (invalid_logical_cpuid(pr->id) && (num_online_cpus() == 1))
+		if (!acpi_has_cpu_in_madt() && invalid_logical_cpuid(pr->id) &&
+		    (num_online_cpus() == 1))
 			pr->id = 0;
+		/*
+		 * Check availability of Processor Performance Control by
+		 * looking at the presence of the _PCT object under the first
+		 * processor definition.
+		 */
+		if (acpi_has_method(pr->handle, "_PCT"))
+			cpufreq_add_device("acpi-cpufreq");
 	}
 
 	/*
@@ -454,13 +491,13 @@ static void acpi_processor_remove(struct acpi_device *device)
 	per_cpu(processors, pr->id) = NULL;
 
 	cpu_maps_update_begin();
-	cpu_hotplug_begin();
+	cpus_write_lock();
 
 	/* Remove the CPU. */
 	arch_unregister_cpu(pr->id);
 	acpi_unmap_cpu(pr->id);
 
-	cpu_hotplug_done();
+	cpus_write_unlock();
 	cpu_maps_update_done();
 
 	try_offline_node(cpu_to_node(pr->id));
@@ -686,6 +723,7 @@ void __init acpi_processor_init(void)
 	acpi_processor_check_duplicates();
 	acpi_scan_add_handler_with_hotplug(&processor_handler, "processor");
 	acpi_scan_add_handler(&processor_container_handler);
+	acpi_pcc_cpufreq_init();
 }
 
 #ifdef CONFIG_ACPI_PROCESSOR_CSTATE

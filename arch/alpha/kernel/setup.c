@@ -319,18 +319,19 @@ setup_memory(void *kernel_end)
 		       i, cluster->usage, cluster->start_pfn,
 		       cluster->start_pfn + cluster->numpages);
 
-		/* Bit 0 is console/PALcode reserved.  Bit 1 is
-		   non-volatile memory -- we might want to mark
-		   this for later.  */
-		if (cluster->usage & 3)
-			continue;
-
 		end = cluster->start_pfn + cluster->numpages;
 		if (end > max_low_pfn)
 			max_low_pfn = end;
 
 		memblock_add(PFN_PHYS(cluster->start_pfn),
 			     cluster->numpages << PAGE_SHIFT);
+
+		/* Bit 0 is console/PALcode reserved.  Bit 1 is
+		   non-volatile memory -- we might want to mark
+		   this for later.  */
+		if (cluster->usage & 3)
+			memblock_reserve(PFN_PHYS(cluster->start_pfn),
+				         cluster->numpages << PAGE_SHIFT);
 	}
 
 	/*
@@ -490,9 +491,9 @@ setup_arch(char **cmdline_p)
 	   boot flags depending on the boot mode, we need some shorthand.
 	   This should do for installation.  */
 	if (strcmp(COMMAND_LINE, "INSTALL") == 0) {
-		strlcpy(command_line, "root=/dev/fd0 load_ramdisk=1", sizeof command_line);
+		strscpy(command_line, "root=/dev/fd0 load_ramdisk=1", sizeof(command_line));
 	} else {
-		strlcpy(command_line, COMMAND_LINE, sizeof command_line);
+		strscpy(command_line, COMMAND_LINE, sizeof(command_line));
 	}
 	strcpy(boot_command_line, command_line);
 	*cmdline_p = command_line;
@@ -657,7 +658,7 @@ setup_arch(char **cmdline_p)
 #endif
 
 	/* Default root filesystem to sda2.  */
-	ROOT_DEV = Root_SDA2;
+	ROOT_DEV = MKDEV(SCSI_DISK0_MAJOR, 2);
 
 #ifdef CONFIG_EISA
 	/* FIXME:  only set this when we actually have EISA in this box? */

@@ -4,7 +4,7 @@
  * Module Name: nsrepair2 - Repair for objects returned by specific
  *                          predefined methods
  *
- * Copyright (C) 2000 - 2021, Intel Corp.
+ * Copyright (C) 2000 - 2023, Intel Corp.
  *
  *****************************************************************************/
 
@@ -379,13 +379,6 @@ acpi_ns_repair_CID(struct acpi_evaluate_info *info,
 
 			(*element_ptr)->common.reference_count =
 			    original_ref_count;
-
-			/*
-			 * The original_element holds a reference from the package object
-			 * that represents _HID. Since a new element was created by _HID,
-			 * remove the reference from the _CID package.
-			 */
-			acpi_ut_remove_reference(original_element);
 		}
 
 		element_ptr++;
@@ -506,7 +499,7 @@ acpi_ns_repair_HID(struct acpi_evaluate_info *info,
 	char *source;
 	char *dest;
 
-	ACPI_FUNCTION_NAME(ns_repair_HID);
+	ACPI_FUNCTION_TRACE(ns_repair_HID);
 
 	/* We only care about string _HID objects (not integers) */
 

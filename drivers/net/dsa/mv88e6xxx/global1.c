@@ -232,6 +232,8 @@ int mv88e6185_g1_set_max_frame_size(struct mv88e6xxx_chip *chip, int mtu)
 	u16 val;
 	int err;
 
+	mtu += ETH_HLEN + ETH_FCS_LEN;
+
 	err = mv88e6xxx_g1_read(chip, MV88E6XXX_G1_CTL1, &val);
 	if (err)
 		return err;
@@ -394,6 +396,18 @@ int mv88e6390_g1_set_cpu_port(struct mv88e6xxx_chip *chip, int port)
 	u16 ptr = MV88E6390_G1_MONITOR_MGMT_CTL_PTR_CPU_DEST;
 
 	/* Use the default high priority for management frames sent to
+	 * the CPU.
+	 */
+	port |= MV88E6390_G1_MONITOR_MGMT_CTL_PTR_CPU_DEST_MGMTPRI;
+
+	return mv88e6390_g1_monitor_write(chip, ptr, port);
+}
+
+int mv88e6390_g1_set_ptp_cpu_port(struct mv88e6xxx_chip *chip, int port)
+{
+	u16 ptr = MV88E6390_G1_MONITOR_MGMT_CTL_PTR_PTP_CPU_DEST;
+
+	/* Use the default high priority for PTP frames sent to
 	 * the CPU.
 	 */
 	port |= MV88E6390_G1_MONITOR_MGMT_CTL_PTR_CPU_DEST_MGMTPRI;

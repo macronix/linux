@@ -85,7 +85,6 @@ struct fimc_scaler {
 /*
  * A structure of fimc context.
  *
- * @regs_res: register resources.
  * @regs: memory mapped io registers.
  * @lock: locking of operations.
  * @clocks: fimc clocks.
@@ -103,7 +102,6 @@ struct fimc_context {
 	struct exynos_drm_ipp_formats	*formats;
 	unsigned int			num_formats;
 
-	struct resource	*regs_res;
 	void __iomem	*regs;
 	spinlock_t	lock;
 	struct clk	*clocks[FIMC_CLKS_MAX];
@@ -784,8 +782,8 @@ static int fimc_set_prescaler(struct fimc_context *ctx, struct fimc_scaler *sc,
 
 	sc->hratio = (src_w << 14) / (dst_w << hfactor);
 	sc->vratio = (src_h << 14) / (dst_h << vfactor);
-	sc->up_h = (dst_w >= src_w) ? true : false;
-	sc->up_v = (dst_h >= src_h) ? true : false;
+	sc->up_h = (dst_w >= src_w);
+	sc->up_v = (dst_h >= src_h);
 	DRM_DEV_DEBUG_KMS(ctx->dev, "hratio[%d]vratio[%d]up_h[%d]up_v[%d]\n",
 			  sc->hratio, sc->vratio, sc->up_h, sc->up_v);
 
@@ -1269,7 +1267,6 @@ static int fimc_probe(struct platform_device *pdev)
 	struct exynos_drm_ipp_formats *formats;
 	struct device *dev = &pdev->dev;
 	struct fimc_context *ctx;
-	struct resource *res;
 	int ret;
 	int i, j, num_limits, num_formats;
 
@@ -1327,20 +1324,17 @@ static int fimc_probe(struct platform_device *pdev)
 	ctx->num_formats = num_formats;
 
 	/* resource memory */
-	ctx->regs_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	ctx->regs = devm_ioremap_resource(dev, ctx->regs_res);
+	ctx->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ctx->regs))
 		return PTR_ERR(ctx->regs);
 
 	/* resource irq */
-	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (!res) {
-		dev_err(dev, "failed to request irq resource.\n");
-		return -ENOENT;
-	}
+	ret = platform_get_irq(pdev, 0);
+	if (ret < 0)
+		return ret;
 
-	ret = devm_request_irq(dev, res->start, fimc_irq_handler,
-		0, dev_name(dev), ctx);
+	ret = devm_request_irq(dev, ret, fimc_irq_handler,
+			       0, dev_name(dev), ctx);
 	if (ret < 0) {
 		dev_err(dev, "failed to request irq.\n");
 		return ret;
@@ -1387,7 +1381,6 @@ static int fimc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM
 static int fimc_runtime_suspend(struct device *dev)
 {
 	struct fimc_context *ctx = get_fimc_context(dev);
@@ -1404,13 +1397,9 @@ static int fimc_runtime_resume(struct device *dev)
 	DRM_DEV_DEBUG_KMS(dev, "id[%d]\n", ctx->id);
 	return clk_prepare_enable(ctx->clocks[FIMC_CLK_GATE]);
 }
-#endif
 
-static const struct dev_pm_ops fimc_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(fimc_runtime_suspend, fimc_runtime_resume, NULL)
-};
+static DEFINE_RUNTIME_DEV_PM_OPS(fimc_pm_ops, fimc_runtime_suspend,
+				 fimc_runtime_resume, NULL);
 
 static const struct of_device_id fimc_of_match[] = {
 	{ .compatible = "samsung,exynos4210-fimc" },
@@ -1426,6 +1415,6 @@ struct platform_driver fimc_driver = {
 		.of_match_table = fimc_of_match,
 		.name	= "exynos-drm-fimc",
 		.owner	= THIS_MODULE,
-		.pm	= &fimc_pm_ops,
+		.pm	= pm_ptr(&fimc_pm_ops),
 	},
 };

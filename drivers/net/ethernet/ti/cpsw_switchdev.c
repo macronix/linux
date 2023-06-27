@@ -252,14 +252,10 @@ static int cpsw_port_vlans_add(struct cpsw_priv *priv,
 {
 	bool untag = vlan->flags & BRIDGE_VLAN_INFO_UNTAGGED;
 	struct net_device *orig_dev = vlan->obj.orig_dev;
-	bool cpu_port = netif_is_bridge_master(orig_dev);
 	bool pvid = vlan->flags & BRIDGE_VLAN_INFO_PVID;
 
 	dev_dbg(priv->dev, "VID add: %s: vid:%u flags:%X\n",
 		priv->ndev->name, vlan->vid, vlan->flags);
-
-	if (cpu_port && !(vlan->flags & BRIDGE_VLAN_INFO_BRENTRY))
-		return 0;
 
 	return cpsw_port_vlan_add(priv, untag, pvid, vlan->vid, orig_dev);
 }
@@ -368,7 +364,7 @@ static int cpsw_port_obj_del(struct net_device *ndev, const void *ctx,
 static void cpsw_fdb_offload_notify(struct net_device *ndev,
 				    struct switchdev_notifier_fdb_info *rcv)
 {
-	struct switchdev_notifier_fdb_info info;
+	struct switchdev_notifier_fdb_info info = {};
 
 	info.addr = rcv->addr;
 	info.vid = rcv->vid;

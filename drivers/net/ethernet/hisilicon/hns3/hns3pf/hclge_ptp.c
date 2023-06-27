@@ -5,40 +5,46 @@
 #include "hclge_main.h"
 #include "hnae3.h"
 
-static int hclge_ptp_adjfreq(struct ptp_clock_info *ptp, s32 ppb)
+static int hclge_ptp_get_cycle(struct hclge_dev *hdev)
 {
-	struct hclge_dev *hdev = hclge_ptp_get_hdev(ptp);
-	u64 adj_val, adj_base, diff;
-	unsigned long flags;
-	bool is_neg = false;
-	u32 quo, numerator;
+	struct hclge_ptp *ptp = hdev->ptp;
 
-	if (ppb < 0) {
-		ppb = -ppb;
-		is_neg = true;
+	ptp->cycle.quo = readl(hdev->ptp->io_base + HCLGE_PTP_CYCLE_QUO_REG) &
+			 HCLGE_PTP_CYCLE_QUO_MASK;
+	ptp->cycle.numer = readl(hdev->ptp->io_base + HCLGE_PTP_CYCLE_NUM_REG);
+	ptp->cycle.den = readl(hdev->ptp->io_base + HCLGE_PTP_CYCLE_DEN_REG);
+
+	if (ptp->cycle.den == 0) {
+		dev_err(&hdev->pdev->dev, "invalid ptp cycle denominator!\n");
+		return -EINVAL;
 	}
 
-	adj_base = HCLGE_PTP_CYCLE_ADJ_BASE * HCLGE_PTP_CYCLE_ADJ_UNIT;
-	adj_val = adj_base * ppb;
-	diff = div_u64(adj_val, 1000000000ULL);
+	return 0;
+}
 
-	if (is_neg)
-		adj_val = adj_base - diff;
-	else
-		adj_val = adj_base + diff;
+static int hclge_ptp_adjfine(struct ptp_clock_info *ptp, long scaled_ppm)
+{
+	struct hclge_dev *hdev = hclge_ptp_get_hdev(ptp);
+	struct hclge_ptp_cycle *cycle = &hdev->ptp->cycle;
+	u64 adj_val, adj_base;
+	unsigned long flags;
+	u32 quo, numerator;
+
+	adj_base = (u64)cycle->quo * (u64)cycle->den + (u64)cycle->numer;
+	adj_val = adjust_by_scaled_ppm(adj_base, scaled_ppm);
 
 	/* This clock cycle is defined by three part: quotient, numerator
 	 * and denominator. For example, 2.5ns, the quotient is 2,
-	 * denominator is fixed to HCLGE_PTP_CYCLE_ADJ_UNIT, and numerator
-	 * is 0.5 * HCLGE_PTP_CYCLE_ADJ_UNIT.
+	 * denominator is fixed to ptp->cycle.den, and numerator
+	 * is 0.5 * ptp->cycle.den.
 	 */
-	quo = div_u64_rem(adj_val, HCLGE_PTP_CYCLE_ADJ_UNIT, &numerator);
+	quo = div_u64_rem(adj_val, cycle->den, &numerator);
 
 	spin_lock_irqsave(&hdev->ptp->lock, flags);
-	writel(quo, hdev->ptp->io_base + HCLGE_PTP_CYCLE_QUO_REG);
+	writel(quo & HCLGE_PTP_CYCLE_QUO_MASK,
+	       hdev->ptp->io_base + HCLGE_PTP_CYCLE_QUO_REG);
 	writel(numerator, hdev->ptp->io_base + HCLGE_PTP_CYCLE_NUM_REG);
-	writel(HCLGE_PTP_CYCLE_ADJ_UNIT,
-	       hdev->ptp->io_base + HCLGE_PTP_CYCLE_DEN_REG);
+	writel(cycle->den, hdev->ptp->io_base + HCLGE_PTP_CYCLE_DEN_REG);
 	writel(HCLGE_PTP_CYCLE_ADJ_EN,
 	       hdev->ptp->io_base + HCLGE_PTP_CYCLE_CFG_REG);
 	spin_unlock_irqrestore(&hdev->ptp->lock, flags);
@@ -428,7 +434,7 @@ static int hclge_ptp_create_clock(struct hclge_dev *hdev)
 	ptp->info.max_adj = HCLGE_PTP_CYCLE_ADJ_MAX;
 	ptp->info.n_ext_ts = 0;
 	ptp->info.pps = 0;
-	ptp->info.adjfreq = hclge_ptp_adjfreq;
+	ptp->info.adjfine = hclge_ptp_adjfine;
 	ptp->info.adjtime = hclge_ptp_adjtime;
 	ptp->info.gettimex64 = hclge_ptp_gettimex;
 	ptp->info.settime64 = hclge_ptp_settime;
@@ -446,7 +452,7 @@ static int hclge_ptp_create_clock(struct hclge_dev *hdev)
 	}
 
 	spin_lock_init(&ptp->lock);
-	ptp->io_base = hdev->hw.io_base + HCLGE_PTP_REG_OFFSET;
+	ptp->io_base = hdev->hw.hw.io_base + HCLGE_PTP_REG_OFFSET;
 	ptp->ts_cfg.rx_filter = HWTSTAMP_FILTER_NONE;
 	ptp->ts_cfg.tx_type = HWTSTAMP_TX_OFF;
 	hdev->ptp = ptp;
@@ -475,6 +481,10 @@ int hclge_ptp_init(struct hclge_dev *hdev)
 		ret = hclge_ptp_create_clock(hdev);
 		if (ret)
 			return ret;
+
+		ret = hclge_ptp_get_cycle(hdev);
+		if (ret)
+			return ret;
 	}
 
 	ret = hclge_ptp_int_en(hdev, true);
@@ -482,7 +492,7 @@ int hclge_ptp_init(struct hclge_dev *hdev)
 		goto out;
 
 	set_bit(HCLGE_PTP_FLAG_EN, &hdev->ptp->flags);
-	ret = hclge_ptp_adjfreq(&hdev->ptp->info, 0);
+	ret = hclge_ptp_adjfine(&hdev->ptp->info, 0);
 	if (ret) {
 		dev_err(&hdev->pdev->dev,
 			"failed to init freq, ret = %d\n", ret);
