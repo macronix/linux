@@ -163,7 +163,7 @@ static inline size_t iov_length(const struct iovec *iov, unsigned long nr_segs)
 	return ret;
 }
 
-size_t copy_page_from_iter_atomic(struct page *page, unsigned offset,
+size_t copy_page_from_iter_atomic(struct page *page, size_t offset,
 				  size_t bytes, struct iov_iter *i);
 void iov_iter_advance(struct iov_iter *i, size_t bytes);
 void iov_iter_revert(struct iov_iter *i, size_t bytes);
@@ -184,6 +184,13 @@ static inline size_t copy_folio_to_iter(struct folio *folio, size_t offset,
 {
 	return copy_page_to_iter(&folio->page, offset, bytes, i);
 }
+
+static inline size_t copy_folio_from_iter_atomic(struct folio *folio,
+		size_t offset, size_t bytes, struct iov_iter *i)
+{
+	return copy_page_from_iter_atomic(&folio->page, offset, bytes, i);
+}
+
 size_t copy_page_to_iter_nofault(struct page *page, unsigned offset,
 				 size_t bytes, struct iov_iter *i);
 
@@ -412,5 +419,10 @@ static inline bool iov_iter_extract_will_pin(const struct iov_iter *iter)
 {
 	return user_backed_iter(iter);
 }
+
+struct sg_table;
+ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t len,
+			   struct sg_table *sgtable, unsigned int sg_max,
+			   iov_iter_extraction_t extraction_flags);
 
 #endif

@@ -1045,7 +1045,7 @@ All time durations are in microseconds.
 	- user_usec
 	- system_usec
 
-	and the following three when the controller is enabled:
+	and the following five when the controller is enabled:
 
 	- nr_periods
 	- nr_throttled
@@ -1579,6 +1579,13 @@ PAGE_SIZE multiple when read back.
 	continue unimpeded as long as other memory can be reclaimed.
 
 	Healthy workloads are not expected to reach this limit.
+
+  memory.swap.peak
+	A read-only single value file which exists on non-root
+	cgroups.
+
+	The max swap usage recorded for the cgroup and its
+	descendants since the creation of the cgroup.
 
   memory.swap.max
 	A read-write single value file which exists on non-root
@@ -2443,7 +2450,7 @@ Miscellaneous controller provides 3 interface files. If two misc resources (res_
 	  res_b 10
 
   misc.current
-        A read-only flat-keyed file shown in the non-root cgroups.  It shows
+        A read-only flat-keyed file shown in the all cgroups.  It shows
         the current usage of the resources in the cgroup and its children.::
 
 	  $ cat misc.current
