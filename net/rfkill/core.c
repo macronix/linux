@@ -539,17 +539,13 @@ bool rfkill_get_global_sw_state(const enum rfkill_type type)
 #endif
 
 bool rfkill_set_hw_state_reason(struct rfkill *rfkill,
-				bool blocked, unsigned long reason)
+				bool blocked,
+				enum rfkill_hard_block_reasons reason)
 {
 	unsigned long flags;
 	bool ret, prev;
 
 	BUG_ON(!rfkill);
-
-	if (WARN(reason &
-	    ~(RFKILL_HARD_BLOCK_SIGNAL | RFKILL_HARD_BLOCK_NOT_OWNER),
-	    "hw_state reason not supported: 0x%lx", reason))
-		return blocked;
 
 	spin_lock_irqsave(&rfkill->lock, flags);
 	prev = !!(rfkill->hard_block_reasons & reason);
@@ -1180,7 +1176,6 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 	init_waitqueue_head(&data->read_wait);
 
 	mutex_lock(&rfkill_global_mutex);
-	mutex_lock(&data->mtx);
 	/*
 	 * start getting events from elsewhere but hold mtx to get
 	 * startup events added first
@@ -1192,10 +1187,11 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 			goto free;
 		rfkill_sync(rfkill);
 		rfkill_fill_event(&ev->ev, rfkill, RFKILL_OP_ADD);
+		mutex_lock(&data->mtx);
 		list_add_tail(&ev->list, &data->events);
+		mutex_unlock(&data->mtx);
 	}
 	list_add(&data->list, &rfkill_fds);
-	mutex_unlock(&data->mtx);
 	mutex_unlock(&rfkill_global_mutex);
 
 	file->private_data = data;
@@ -1203,7 +1199,6 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 	return stream_open(inode, file);
 
  free:
-	mutex_unlock(&data->mtx);
 	mutex_unlock(&rfkill_global_mutex);
 	mutex_destroy(&data->mtx);
 	list_for_each_entry_safe(ev, tmp, &data->events, list)
@@ -1352,11 +1347,11 @@ static long rfkill_fop_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct rfkill_data *data = file->private_data;
-	int ret = -ENOSYS;
+	int ret = -ENOTTY;
 	u32 size;
 
 	if (_IOC_TYPE(cmd) != RFKILL_IOC_MAGIC)
-		return -ENOSYS;
+		return -ENOTTY;
 
 	mutex_lock(&data->mtx);
 	switch (_IOC_NR(cmd)) {
@@ -1399,7 +1394,6 @@ static const struct file_operations rfkill_fops = {
 	.release	= rfkill_fop_release,
 	.unlocked_ioctl	= rfkill_fop_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
-	.llseek		= no_llseek,
 };
 
 #define RFKILL_NAME "rfkill"

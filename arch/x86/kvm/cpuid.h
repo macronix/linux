@@ -2,7 +2,6 @@
 #ifndef ARCH_X86_KVM_CPUID_H
 #define ARCH_X86_KVM_CPUID_H
 
-#include "x86.h"
 #include "reverse_cpuid.h"
 #include <asm/cpu.h>
 #include <asm/processor.h>
@@ -32,6 +31,7 @@ int kvm_vcpu_ioctl_get_cpuid2(struct kvm_vcpu *vcpu,
 bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 	       u32 *ecx, u32 *edx, bool exact_only);
 
+void __init kvm_init_xstate_sizes(void);
 u32 xstate_required_size(u64 xstate_bv, bool compacted);
 
 int cpuid_query_maxphyaddr(struct kvm_vcpu *vcpu);
@@ -45,11 +45,6 @@ static inline int cpuid_maxphyaddr(struct kvm_vcpu *vcpu)
 static inline bool kvm_vcpu_is_legal_gpa(struct kvm_vcpu *vcpu, gpa_t gpa)
 {
 	return !(gpa & vcpu->arch.reserved_gpa_bits);
-}
-
-static inline bool kvm_vcpu_is_illegal_gpa(struct kvm_vcpu *vcpu, gpa_t gpa)
-{
-	return !kvm_vcpu_is_legal_gpa(vcpu, gpa);
 }
 
 static inline bool kvm_vcpu_is_legal_aligned_gpa(struct kvm_vcpu *vcpu,
@@ -107,22 +102,14 @@ static __always_inline void guest_cpuid_clear(struct kvm_vcpu *vcpu,
 		*reg &= ~__feature_bit(x86_feature);
 }
 
-static inline bool guest_cpuid_is_amd_or_hygon(struct kvm_vcpu *vcpu)
+static inline bool guest_cpuid_is_amd_compatible(struct kvm_vcpu *vcpu)
 {
-	struct kvm_cpuid_entry2 *best;
-
-	best = kvm_find_cpuid_entry(vcpu, 0);
-	return best &&
-	       (is_guest_vendor_amd(best->ebx, best->ecx, best->edx) ||
-		is_guest_vendor_hygon(best->ebx, best->ecx, best->edx));
+	return vcpu->arch.is_amd_compatible;
 }
 
-static inline bool guest_cpuid_is_intel(struct kvm_vcpu *vcpu)
+static inline bool guest_cpuid_is_intel_compatible(struct kvm_vcpu *vcpu)
 {
-	struct kvm_cpuid_entry2 *best;
-
-	best = kvm_find_cpuid_entry(vcpu, 0);
-	return best && is_guest_vendor_intel(best->ebx, best->ecx, best->edx);
+	return !guest_cpuid_is_amd_compatible(vcpu);
 }
 
 static inline int guest_cpuid_family(struct kvm_vcpu *vcpu)
@@ -174,7 +161,8 @@ static inline bool guest_has_spec_ctrl_msr(struct kvm_vcpu *vcpu)
 static inline bool guest_has_pred_cmd_msr(struct kvm_vcpu *vcpu)
 {
 	return (guest_cpuid_has(vcpu, X86_FEATURE_SPEC_CTRL) ||
-		guest_cpuid_has(vcpu, X86_FEATURE_AMD_IBPB));
+		guest_cpuid_has(vcpu, X86_FEATURE_AMD_IBPB) ||
+		guest_cpuid_has(vcpu, X86_FEATURE_SBPB));
 }
 
 static inline bool supports_cpuid_fault(struct kvm_vcpu *vcpu)
@@ -276,6 +264,14 @@ static __always_inline bool guest_can_use(struct kvm_vcpu *vcpu,
 
 	return test_bit(kvm_governed_feature_index(x86_feature),
 			vcpu->arch.governed_features.enabled);
+}
+
+static inline bool kvm_vcpu_is_legal_cr3(struct kvm_vcpu *vcpu, unsigned long cr3)
+{
+	if (guest_can_use(vcpu, X86_FEATURE_LAM))
+		cr3 &= ~(X86_CR3_LAM_U48 | X86_CR3_LAM_U57);
+
+	return kvm_vcpu_is_legal_gpa(vcpu, cr3);
 }
 
 #endif

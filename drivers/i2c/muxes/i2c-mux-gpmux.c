@@ -52,7 +52,7 @@ static struct i2c_adapter *mux_parent_adapter(struct device *dev)
 		dev_err(dev, "Cannot parse i2c-parent\n");
 		return ERR_PTR(-ENODEV);
 	}
-	parent = of_find_i2c_adapter_by_node(parent_np);
+	parent = of_get_i2c_adapter_by_node(parent_np);
 	of_node_put(parent_np);
 	if (!parent)
 		return ERR_PTR(-EPROBE_DEFER);
@@ -124,7 +124,7 @@ static int i2c_mux_probe(struct platform_device *pdev)
 			goto err_children;
 		}
 
-		ret = i2c_mux_add_adapter(muxc, 0, chan, 0);
+		ret = i2c_mux_add_adapter(muxc, 0, chan);
 		if (ret)
 			goto err_children;
 	}
@@ -152,7 +152,7 @@ static void i2c_mux_remove(struct platform_device *pdev)
 
 static struct platform_driver i2c_mux_driver = {
 	.probe	= i2c_mux_probe,
-	.remove_new = i2c_mux_remove,
+	.remove = i2c_mux_remove,
 	.driver	= {
 		.name	= "i2c-mux-gpmux",
 		.of_match_table = i2c_mux_of_match,

@@ -50,16 +50,11 @@
 
 #include "fib_lookup.h"
 
-static DEFINE_SPINLOCK(fib_info_lock);
 static struct hlist_head *fib_info_hash;
 static struct hlist_head *fib_info_laddrhash;
 static unsigned int fib_info_hash_size;
 static unsigned int fib_info_hash_bits;
 static unsigned int fib_info_cnt;
-
-#define DEVINDEX_HASHBITS 8
-#define DEVINDEX_HASHSIZE (1U << DEVINDEX_HASHBITS)
-static struct hlist_head fib_info_devhash[DEVINDEX_HASHSIZE];
 
 /* for_nexthops and change_nexthops only used when nexthop object
  * is not set in a fib_info. The logic within can reference fib_nh.
@@ -254,18 +249,17 @@ void free_fib_info(struct fib_info *fi)
 		return;
 	}
 
-	call_rcu(&fi->rcu, free_fib_info_rcu);
+	call_rcu_hurry(&fi->rcu, free_fib_info_rcu);
 }
 EXPORT_SYMBOL_GPL(free_fib_info);
 
 void fib_release_info(struct fib_info *fi)
 {
-	spin_lock_bh(&fib_info_lock);
+	ASSERT_RTNL();
 	if (fi && refcount_dec_and_test(&fi->fib_treeref)) {
 		hlist_del(&fi->fib_hash);
 
-		/* Paired with READ_ONCE() in fib_create_info(). */
-		WRITE_ONCE(fib_info_cnt, fib_info_cnt - 1);
+		fib_info_cnt--;
 
 		if (fi->fib_prefsrc)
 			hlist_del(&fi->fib_lhash);
@@ -275,14 +269,13 @@ void fib_release_info(struct fib_info *fi)
 			change_nexthops(fi) {
 				if (!nexthop_nh->fib_nh_dev)
 					continue;
-				hlist_del(&nexthop_nh->nh_hash);
+				hlist_del_rcu(&nexthop_nh->nh_hash);
 			} endfor_nexthops(fi)
 		}
 		/* Paired with READ_ONCE() from fib_table_lookup() */
 		WRITE_ONCE(fi->fib_dead, 1);
 		fib_info_put(fi);
 	}
-	spin_unlock_bh(&fib_info_lock);
 }
 
 static inline int nh_comp(struct fib_info *fi, struct fib_info *ofi)
@@ -322,17 +315,9 @@ static inline int nh_comp(struct fib_info *fi, struct fib_info *ofi)
 	return 0;
 }
 
-static inline unsigned int fib_devindex_hashfn(unsigned int val)
+static struct hlist_head *fib_nh_head(struct net_device *dev)
 {
-	return hash_32(val, DEVINDEX_HASHBITS);
-}
-
-static struct hlist_head *
-fib_info_devhash_bucket(const struct net_device *dev)
-{
-	u32 val = net_hash_mix(dev_net(dev)) ^ dev->ifindex;
-
-	return &fib_info_devhash[fib_devindex_hashfn(val)];
+	return &dev->fib_nh_head;
 }
 
 static unsigned int fib_info_hashfn_1(int init_val, u8 protocol, u8 scope,
@@ -347,11 +332,10 @@ static unsigned int fib_info_hashfn_1(int init_val, u8 protocol, u8 scope,
 	return val;
 }
 
-static unsigned int fib_info_hashfn_result(unsigned int val)
+static unsigned int fib_info_hashfn_result(const struct net *net,
+					   unsigned int val)
 {
-	unsigned int mask = (fib_info_hash_size - 1);
-
-	return (val ^ (val >> 7) ^ (val >> 12)) & mask;
+	return hash_32(val ^ net_hash_mix(net), fib_info_hash_bits);
 }
 
 static inline unsigned int fib_info_hashfn(struct fib_info *fi)
@@ -363,14 +347,14 @@ static inline unsigned int fib_info_hashfn(struct fib_info *fi)
 				fi->fib_priority);
 
 	if (fi->nh) {
-		val ^= fib_devindex_hashfn(fi->nh->id);
+		val ^= fi->nh->id;
 	} else {
 		for_nexthops(fi) {
-			val ^= fib_devindex_hashfn(nh->fib_nh_oif);
+			val ^= nh->fib_nh_oif;
 		} endfor_nexthops(fi)
 	}
 
-	return fib_info_hashfn_result(val);
+	return fib_info_hashfn_result(fi->fib_net, val);
 }
 
 /* no metrics, only nexthop id */
@@ -381,11 +365,11 @@ static struct fib_info *fib_find_info_nh(struct net *net,
 	struct fib_info *fi;
 	unsigned int hash;
 
-	hash = fib_info_hashfn_1(fib_devindex_hashfn(cfg->fc_nh_id),
+	hash = fib_info_hashfn_1(cfg->fc_nh_id,
 				 cfg->fc_protocol, cfg->fc_scope,
 				 (__force u32)cfg->fc_prefsrc,
 				 cfg->fc_priority);
-	hash = fib_info_hashfn_result(hash);
+	hash = fib_info_hashfn_result(net, hash);
 	head = &fib_info_hash[hash];
 
 	hlist_for_each_entry(fi, head, fib_hash) {
@@ -437,27 +421,22 @@ static struct fib_info *fib_find_info(struct fib_info *nfi)
 }
 
 /* Check, that the gateway is already configured.
- * Used only by redirect accept routine.
+ * Used only by redirect accept routine, under rcu_read_lock();
  */
 int ip_fib_check_default(__be32 gw, struct net_device *dev)
 {
 	struct hlist_head *head;
 	struct fib_nh *nh;
 
-	spin_lock(&fib_info_lock);
+	head = fib_nh_head(dev);
 
-	head = fib_info_devhash_bucket(dev);
-
-	hlist_for_each_entry(nh, head, nh_hash) {
-		if (nh->fib_nh_dev == dev &&
-		    nh->fib_nh_gw4 == gw &&
+	hlist_for_each_entry_rcu(nh, head, nh_hash) {
+		DEBUG_NET_WARN_ON_ONCE(nh->fib_nh_dev != dev);
+		if (nh->fib_nh_gw4 == gw &&
 		    !(nh->fib_nh_flags & RTNH_F_DEAD)) {
-			spin_unlock(&fib_info_lock);
 			return 0;
 		}
 	}
-
-	spin_unlock(&fib_info_lock);
 
 	return -1;
 }
@@ -543,8 +522,7 @@ void rtmsg_fib(int event, __be32 key, struct fib_alias *fa,
 		    info->nlh, GFP_KERNEL);
 	return;
 errout:
-	if (err < 0)
-		rtnl_set_sk_err(info->nl_net, RTNLGRP_IPV4_ROUTE, err);
+	rtnl_set_sk_err(info->nl_net, RTNLGRP_IPV4_ROUTE, err);
 }
 
 static int fib_detect_death(struct fib_info *fi, int order,
@@ -1030,7 +1008,7 @@ bool fib_metrics_match(struct fib_config *cfg, struct fib_info *fi)
 			bool ecn_ca = false;
 
 			nla_strscpy(tmp, nla, sizeof(tmp));
-			val = tcp_ca_get_key_by_name(fi->fib_net, tmp, &ecn_ca);
+			val = tcp_ca_get_key_by_name(tmp, &ecn_ca);
 		} else {
 			if (nla_len(nla) != sizeof(u32))
 				return false;
@@ -1278,7 +1256,7 @@ static void fib_info_hash_move(struct hlist_head *new_info_hash,
 	unsigned int old_size = fib_info_hash_size;
 	unsigned int i;
 
-	spin_lock_bh(&fib_info_lock);
+	ASSERT_RTNL();
 	old_info_hash = fib_info_hash;
 	old_laddrhash = fib_info_laddrhash;
 	fib_info_hash_size = new_size;
@@ -1315,8 +1293,6 @@ static void fib_info_hash_move(struct hlist_head *new_info_hash,
 		}
 	}
 
-	spin_unlock_bh(&fib_info_lock);
-
 	kvfree(old_info_hash);
 	kvfree(old_laddrhash);
 }
@@ -1325,15 +1301,18 @@ __be32 fib_info_update_nhc_saddr(struct net *net, struct fib_nh_common *nhc,
 				 unsigned char scope)
 {
 	struct fib_nh *nh;
+	__be32 saddr;
 
 	if (nhc->nhc_family != AF_INET)
 		return inet_select_addr(nhc->nhc_dev, 0, scope);
 
 	nh = container_of(nhc, struct fib_nh, nh_common);
-	nh->nh_saddr = inet_select_addr(nh->fib_nh_dev, nh->fib_nh_gw4, scope);
-	nh->nh_saddr_genid = atomic_read(&net->ipv4.dev_addr_genid);
+	saddr = inet_select_addr(nh->fib_nh_dev, nh->fib_nh_gw4, scope);
 
-	return nh->nh_saddr;
+	WRITE_ONCE(nh->nh_saddr, saddr);
+	WRITE_ONCE(nh->nh_saddr_genid, atomic_read(&net->ipv4.dev_addr_genid));
+
+	return saddr;
 }
 
 __be32 fib_result_prefsrc(struct net *net, struct fib_result *res)
@@ -1347,8 +1326,9 @@ __be32 fib_result_prefsrc(struct net *net, struct fib_result *res)
 		struct fib_nh *nh;
 
 		nh = container_of(nhc, struct fib_nh, nh_common);
-		if (nh->nh_saddr_genid == atomic_read(&net->ipv4.dev_addr_genid))
-			return nh->nh_saddr;
+		if (READ_ONCE(nh->nh_saddr_genid) ==
+		    atomic_read(&net->ipv4.dev_addr_genid))
+			return READ_ONCE(nh->nh_saddr);
 	}
 
 	return fib_info_update_nhc_saddr(net, nhc, res->fi->fib_scope);
@@ -1388,6 +1368,7 @@ struct fib_info *fib_create_info(struct fib_config *cfg,
 	int nhs = 1;
 	struct net *net = cfg->fc_nlinfo.nl_net;
 
+	ASSERT_RTNL();
 	if (cfg->fc_type > RTN_MAX)
 		goto err_inval;
 
@@ -1430,8 +1411,7 @@ struct fib_info *fib_create_info(struct fib_config *cfg,
 
 	err = -ENOBUFS;
 
-	/* Paired with WRITE_ONCE() in fib_release_info() */
-	if (READ_ONCE(fib_info_cnt) >= fib_info_hash_size) {
+	if (fib_info_cnt >= fib_info_hash_size) {
 		unsigned int new_size = fib_info_hash_size << 1;
 		struct hlist_head *new_info_hash;
 		struct hlist_head *new_laddrhash;
@@ -1455,8 +1435,7 @@ struct fib_info *fib_create_info(struct fib_config *cfg,
 	fi = kzalloc(struct_size(fi, fib_nh, nhs), GFP_KERNEL);
 	if (!fi)
 		goto failure;
-	fi->fib_metrics = ip_fib_metrics_init(fi->fib_net, cfg->fc_mx,
-					      cfg->fc_mx_len, extack);
+	fi->fib_metrics = ip_fib_metrics_init(cfg->fc_mx, cfg->fc_mx_len, extack);
 	if (IS_ERR(fi->fib_metrics)) {
 		err = PTR_ERR(fi->fib_metrics);
 		kfree(fi);
@@ -1591,7 +1570,7 @@ link_it:
 
 	refcount_set(&fi->fib_treeref, 1);
 	refcount_set(&fi->fib_clntref, 1);
-	spin_lock_bh(&fib_info_lock);
+
 	fib_info_cnt++;
 	hlist_add_head(&fi->fib_hash,
 		       &fib_info_hash[fib_info_hashfn(fi)]);
@@ -1609,11 +1588,10 @@ link_it:
 
 			if (!nexthop_nh->fib_nh_dev)
 				continue;
-			head = fib_info_devhash_bucket(nexthop_nh->fib_nh_dev);
-			hlist_add_head(&nexthop_nh->nh_hash, head);
+			head = fib_nh_head(nexthop_nh->fib_nh_dev);
+			hlist_add_head_rcu(&nexthop_nh->nh_hash, head);
 		} endfor_nexthops(fi)
 	}
-	spin_unlock_bh(&fib_info_lock);
 	return fi;
 
 err_inval:
@@ -1963,12 +1941,12 @@ void fib_nhc_update_mtu(struct fib_nh_common *nhc, u32 new, u32 orig)
 
 void fib_sync_mtu(struct net_device *dev, u32 orig_mtu)
 {
-	struct hlist_head *head = fib_info_devhash_bucket(dev);
+	struct hlist_head *head = fib_nh_head(dev);
 	struct fib_nh *nh;
 
 	hlist_for_each_entry(nh, head, nh_hash) {
-		if (nh->fib_nh_dev == dev)
-			fib_nhc_update_mtu(&nh->nh_common, dev->mtu, orig_mtu);
+		DEBUG_NET_WARN_ON_ONCE(nh->fib_nh_dev != dev);
+		fib_nhc_update_mtu(&nh->nh_common, dev->mtu, orig_mtu);
 	}
 }
 
@@ -1982,7 +1960,7 @@ void fib_sync_mtu(struct net_device *dev, u32 orig_mtu)
  */
 int fib_sync_down_dev(struct net_device *dev, unsigned long event, bool force)
 {
-	struct hlist_head *head = fib_info_devhash_bucket(dev);
+	struct hlist_head *head = fib_nh_head(dev);
 	struct fib_info *prev_fi = NULL;
 	int scope = RT_SCOPE_NOWHERE;
 	struct fib_nh *nh;
@@ -1996,7 +1974,8 @@ int fib_sync_down_dev(struct net_device *dev, unsigned long event, bool force)
 		int dead;
 
 		BUG_ON(!fi->fib_nhs);
-		if (nh->fib_nh_dev != dev || fi == prev_fi)
+		DEBUG_NET_WARN_ON_ONCE(nh->fib_nh_dev != dev);
+		if (fi == prev_fi)
 			continue;
 		prev_fi = fi;
 		dead = 0;
@@ -2063,8 +2042,7 @@ static void fib_select_default(const struct flowi4 *flp, struct fib_result *res)
 
 		if (fa->fa_slen != slen)
 			continue;
-		if (fa->fa_dscp &&
-		    fa->fa_dscp != inet_dsfield_to_dscp(flp->flowi4_tos))
+		if (fa->fa_dscp && !fib_dscp_masked_match(fa->fa_dscp, flp))
 			continue;
 		if (fa->tb_id != tb->tb_id)
 			continue;
@@ -2147,7 +2125,7 @@ int fib_sync_up(struct net_device *dev, unsigned char nh_flags)
 	}
 
 	prev_fi = NULL;
-	head = fib_info_devhash_bucket(dev);
+	head = fib_nh_head(dev);
 	ret = 0;
 
 	hlist_for_each_entry(nh, head, nh_hash) {
@@ -2155,7 +2133,8 @@ int fib_sync_up(struct net_device *dev, unsigned char nh_flags)
 		int alive;
 
 		BUG_ON(!fi->fib_nhs);
-		if (nh->fib_nh_dev != dev || fi == prev_fi)
+		DEBUG_NET_WARN_ON_ONCE(nh->fib_nh_dev != dev);
+		if (fi == prev_fi)
 			continue;
 
 		prev_fi = fi;
@@ -2266,6 +2245,15 @@ void fib_select_path(struct net *net, struct fib_result *res,
 		fib_select_default(fl4, res);
 
 check_saddr:
-	if (!fl4->saddr)
-		fl4->saddr = fib_result_prefsrc(net, res);
+	if (!fl4->saddr) {
+		struct net_device *l3mdev;
+
+		l3mdev = dev_get_by_index_rcu(net, fl4->flowi4_l3mdev);
+
+		if (!l3mdev ||
+		    l3mdev_master_dev_rcu(FIB_RES_DEV(*res)) == l3mdev)
+			fl4->saddr = fib_result_prefsrc(net, res);
+		else
+			fl4->saddr = inet_select_addr(l3mdev, 0, RT_SCOPE_LINK);
+	}
 }
